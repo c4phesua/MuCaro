@@ -1,4 +1,4 @@
-from src.environments.caro import Board
+from src.environment.caro import Board
 
 if __name__ == '__main__':
     board = Board(size=3)

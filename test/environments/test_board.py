@@ -1,6 +1,6 @@
 import torch
 
-from src.environments.caro import Board
+from src.environment.caro import Board
 
 
 def test_play_board():
