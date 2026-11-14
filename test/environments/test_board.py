@@ -31,7 +31,7 @@ def test_play_board_invalid_move_1():
     board.play(5)
     board.play(2)
     board.play(8)
-    assert board.play(8) == -1
+    assert board.play(8) == {'next_state': None, 'winner': None}
 
 
 def test_play_board_invalid_move_2():
@@ -39,7 +39,7 @@ def test_play_board_invalid_move_2():
     board.play(0)
     board.play(5)
     board.play(2)
-    assert board.play(5) == -1
+    assert board.play(5) == {'next_state': None, 'winner': None}
 
 
 def test_play_board_invalid_move_3():
@@ -47,4 +47,4 @@ def test_play_board_invalid_move_3():
     board.play(0)
     board.play(5)
     board.play(2)
-    assert board.play(0) == -1
+    assert board.play(0) == {'next_state': None, 'winner': None}

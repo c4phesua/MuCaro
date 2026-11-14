@@ -24,8 +24,9 @@ class Board:
         return screen
 
     def play(self, index: int):
+        # this one will return json like object (next_state, winner)
         if self.state[0][index].item() != 0.0 or self.state[1][index].item() != 0.0:
-            return -1
+            return {'next_state': None, 'winner': None}
         self.state[self.current_player][index] = 1
         self.current_player = (self.current_player + 1) % 2
-        return self.state.clone()
+        return {'next_state': self.state.clone(), 'winner': None}
