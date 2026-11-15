@@ -1,3 +1,5 @@
+from turtle import done
+
 import torch
 from torch import zeros
 
@@ -8,6 +10,7 @@ class Board:
         self.state = zeros((2, size * size), dtype=torch.float32, requires_grad=False)
         self.size = size
         self.m = win_length
+        self.done = False
 
     def render_board(self, printable=False):
         screen = [[0 for j in range(self.size)] for i in range(self.size)]
@@ -28,15 +31,24 @@ class Board:
             return self.state[[1, 0], :]
         return self.state.clone()
 
+    def reset(self):
+        self.current_player = 0
+        self.state.zero_()
+        self.done = False
+
     def play(self, index: int):
         # this one will return json like object (next_state, winner, done)
+        if done:
+            raise Exception('Game is done, please reset the board')
         if self.state[0][index].item() != 0.0 or self.state[1][index].item() != 0.0:
             raise ValueError('Invalid move')
         self.state[self.current_player][index] = 1
         win_check = self.check_win(index)
         if win_check == -1:
+            self.done = True
             return {'next_state': self.get_canonical_state(), 'winner': -1, 'done': True}
         if win_check == 1:
+            self.done = True
             return {'next_state': self.get_canonical_state(), 'winner': self.current_player, 'done': True}
         self.current_player = (self.current_player + 1) % 2
         return {'next_state': self.get_canonical_state(), 'winner': None, 'done': False}
