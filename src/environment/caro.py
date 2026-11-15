@@ -38,7 +38,7 @@ class Board:
 
     def play(self, index: int):
         # this one will return json like object (next_state, winner, done)
-        if done:
+        if self.done:
             raise Exception('Game is done, please reset the board')
         if self.state[0][index].item() != 0.0 or self.state[1][index].item() != 0.0:
             raise ValueError('Invalid move')

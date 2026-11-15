@@ -61,3 +61,9 @@ def test_play_board_invalid_move_3():
 
     # Verify the exact error message matches what you wrote in the engine
     assert str(exc_info.value) == 'Invalid move'
+
+
+def test_play_board_canonical():
+    board = Board(size=3)
+    result = board.play(4)
+    assert result['next_state'][0][4].item() == 1.0
