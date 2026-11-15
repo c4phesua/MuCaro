@@ -66,4 +66,11 @@ def test_play_board_invalid_move_3():
 def test_play_board_canonical():
     board = Board(size=3)
     result = board.play(4)
+    assert result['next_state'][1][4].item() == 1.0
+    result = board.play(0)
     assert result['next_state'][0][4].item() == 1.0
+    assert result['next_state'][1][0].item() == 1.0
+    result = board.play(8)
+    assert result['next_state'][1][4].item() == 1.0
+    assert result['next_state'][0][0].item() == 1.0
+    assert result['next_state'][1][8].item() == 1.0
