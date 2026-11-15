@@ -29,7 +29,7 @@ class Board:
         return self.state.clone()
 
     def play(self, index: int):
-        # this one will return json like object (next_state, winner)
+        # this one will return json like object (next_state, winner, done)
         if self.state[0][index].item() != 0.0 or self.state[1][index].item() != 0.0:
             raise ValueError('Invalid move')
         self.state[self.current_player][index] = 1
