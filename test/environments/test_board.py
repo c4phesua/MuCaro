@@ -107,3 +107,35 @@ def test_play_board_check_win_and_reset():
     zeros_state = torch.zeros(2, 9)
     assert torch.equal(result['next_state'], zeros_state)
     assert torch.equal(board.state, zeros_state)
+
+def test_play_check_win_5x5():
+    board = Board(size=5)
+    result = board.play(3)
+    assert result['done'] is False
+    assert result['winner'] is None
+    result = board.play(6)
+    assert result['done'] is False
+    assert result['winner'] is None
+    result = board.play(12)
+    assert result['done'] is False
+    assert result['winner'] is None
+    result = board.play(11)
+    assert result['done'] is False
+    assert result['winner'] is None
+    result = board.play(20)
+    assert result['done'] is False
+    assert result['winner'] is None
+    result = board.play(16)
+    assert result['done'] is True
+    assert result['winner'] == 1
+    expected_state = torch.tensor([[0, 0, 0, 0, 0,
+                                    0, 1, 0, 0, 0,
+                                    0, 1, 0, 0, 0,
+                                    0, 1, 0, 0, 0,
+                                    0, 0, 0, 0, 0],
+                                   [0, 0, 0, 1, 0,
+                                    0, 0, 0, 0, 0,
+                                    0, 0, 1, 0, 0,
+                                    0, 0, 0, 0, 0,
+                                    1, 0, 0, 0, 0]], dtype=torch.float32)
+    assert torch.equal(result['next_state'], expected_state)
