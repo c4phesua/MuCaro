@@ -35,6 +35,7 @@ class Board:
         self.current_player = 0
         self.state.zero_()
         self.done = False
+        return {'next_state': self.get_canonical_state(), 'winner': None, 'done': False}
 
     def play(self, index: int):
         # this one will return json like object (next_state, winner, done)
