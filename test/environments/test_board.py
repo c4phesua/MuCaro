@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from src.environment.caro import Board
@@ -31,7 +32,11 @@ def test_play_board_invalid_move_1():
     board.play(5)
     board.play(2)
     board.play(8)
-    assert board.play(8) == {'next_state': None, 'winner': None}
+    with pytest.raises(ValueError) as exc_info:
+        board.play(8)
+
+    # Verify the exact error message matches what you wrote in the engine
+    assert str(exc_info.value) == 'Invalid move'
 
 
 def test_play_board_invalid_move_2():
@@ -39,7 +44,11 @@ def test_play_board_invalid_move_2():
     board.play(0)
     board.play(5)
     board.play(2)
-    assert board.play(5) == {'next_state': None, 'winner': None}
+    with pytest.raises(ValueError) as exc_info:
+        board.play(5)
+
+    # Verify the exact error message matches what you wrote in the engine
+    assert str(exc_info.value) == 'Invalid move'
 
 
 def test_play_board_invalid_move_3():
@@ -47,4 +56,8 @@ def test_play_board_invalid_move_3():
     board.play(0)
     board.play(5)
     board.play(2)
-    assert board.play(0) == {'next_state': None, 'winner': None}
+    with pytest.raises(ValueError) as exc_info:
+        board.play(0)
+
+    # Verify the exact error message matches what you wrote in the engine
+    assert str(exc_info.value) == 'Invalid move'
