@@ -71,7 +71,7 @@ class MCTS:
         max_child_index = np.argmax(scores)
         return parent.children[max_child_index]
 
-    def ucb_scores(self, parent: Node, min_max_stats: MinMaxStats) -> List[Optional[float]]:
+    def ucb_scores(self, parent: Node, min_max_stats: MinMaxStats) -> List[float]:
         scores = [float('-inf')] * self.action_space_size
         c = math.log((parent.visit_count + self.pb_c_base + 1) / self.pb_c_base) + self.pb_c_init
         for i, child in enumerate(parent.children):
