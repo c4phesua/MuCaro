@@ -1,6 +1,7 @@
 class Node:
     __slots__ = (
         "prior",
+        "action",
         "visit_count",
         "value_sum",
         "reward",
@@ -8,8 +9,9 @@ class Node:
         "children",
     )
 
-    def __init__(self, action_space_size: int, prior: float = 0.0):
+    def __init__(self, action: int, action_space_size: int, prior: float = 0.0):
         self.prior = prior
+        self.action = action
         self.visit_count = 0
         self.value_sum = 0.0
         self.reward = 0.0
