@@ -62,7 +62,8 @@ class MCTS:
     def cal_distribution(self, root, num_simulations):
         distribution = [0] * self.action_space_size
         for child in root.children:
-            distribution[child.action] = child.visit_count / num_simulations
+            if child is not None:
+                distribution[child.action] = child.visit_count / num_simulations
         return distribution
 
     def select_child(self, parent: Node, min_max_stats: MinMaxStats):
