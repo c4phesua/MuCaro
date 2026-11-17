@@ -109,7 +109,6 @@ def test_add_exploration_noise(mcts_env):
     mcts, action_space_size = mcts_env
     root = Node(action=-1, action_space_size=action_space_size)
 
-    # [FIX] Chia đều chính xác thay vì hard-code 0.111
     exact_prior = 1.0 / action_space_size
     for i in range(action_space_size):
         root.children[i] = Node(action=i, action_space_size=action_space_size, prior=exact_prior)
