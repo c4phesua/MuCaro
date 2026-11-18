@@ -30,17 +30,14 @@ class MuCaroTrainer:
         self.mcts: MCTS = mcts
         self.network: MuCaroNetwork = network
 
-        # Replay buffer storing full game trajectories
         self.replay_buffer: deque = deque(maxlen=buffer_size)
 
-        # Hyperparameters
         self.batch_size = batch_size
         self.unroll_steps = unroll_steps
         self.num_simulations = num_simulations
         self.discount = discount
         self.temp_threshold = temp_threshold
 
-        # Collect parameters from all three sub-networks (h, f, g) into a single optimizer
         params = (
                 list(self.network.h_network.parameters())
                 + list(self.network.f_network.parameters())

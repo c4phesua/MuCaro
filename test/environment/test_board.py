@@ -108,6 +108,7 @@ def test_play_board_check_win_and_reset():
     assert torch.equal(result['next_state'], zeros_state)
     assert torch.equal(board.state, zeros_state)
 
+
 def test_play_check_win_5x5():
     board = Board(size=5)
     result = board.play(3)
@@ -139,3 +140,12 @@ def test_play_check_win_5x5():
                                     0, 0, 0, 0, 0,
                                     1, 0, 0, 0, 0]], dtype=torch.float32)
     assert torch.equal(result['next_state'], expected_state)
+
+
+def test_get_legal_moves():
+    board = Board(size=3)
+    board.play(0)
+    board.play(5)
+    board.play(2)
+    board.play(8)
+    assert board.get_legal_moves() == [False, True, False, True, True, False, True, True, False]
