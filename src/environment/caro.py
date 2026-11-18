@@ -88,5 +88,5 @@ class Board:
             return -1
         return 0
 
-    def get_legal_moves(self):
+    def get_legal_mask(self):
         return [not bool(self.state[0][i] + self.state[1][i]) for i in range(self.size * self.size)]

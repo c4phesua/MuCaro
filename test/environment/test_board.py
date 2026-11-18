@@ -148,4 +148,4 @@ def test_get_legal_moves():
     board.play(5)
     board.play(2)
     board.play(8)
-    assert board.get_legal_moves() == [False, True, False, True, True, False, True, True, False]
+    assert board.get_legal_mask() == [False, True, False, True, True, False, True, True, False]
