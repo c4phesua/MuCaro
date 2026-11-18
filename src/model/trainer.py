@@ -57,51 +57,54 @@ class MuCaroTrainer:
 
     def self_play_game(self) -> Dict[str, list]:
         self._set_eval_mode()
-        obs = self.env.reset()
-        done = False
+        obs = self.env.reset()['next_state']
+        done: bool = False
 
         observations, actions, rewards, policies = [], [], [], []
         step = 0
+        # flag to check if there is an invalid move was played
+        is_game_aborted = False
 
         while not done:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32).unsqueeze(0)
+            obs_tensor = torch.tensor(obs, dtype=torch.float32)
             pi = self.mcts.simulate(
                 current_state=obs_tensor,
                 num_simulations=self.num_simulations,
                 is_training=True,
             )
-
-            # Mask out illegal moves and re-normalize the policy distribution
-            legal_mask = np.asarray(self.env.get_legal_mask(), dtype=np.float32)
-            masked_pi = np.asarray(pi, dtype=np.float32) * legal_mask
-            if masked_pi.sum() > 0:
-                masked_pi /= masked_pi.sum()
-            else:
-                masked_pi = legal_mask / legal_mask.sum()
-
-            # Sample probabilistically during opening moves; act greedily afterwards
             if step < self.temp_threshold:
-                action = int(np.random.choice(len(masked_pi), p=masked_pi))
+                action = int(np.random.choice(len(pi), p=pi))
             else:
-                action = int(np.argmax(masked_pi))
-
-            next_obs, reward, done = self.env.step(action)
-
+                action = int(np.argmax(pi))
+            reward = 0
+            try:
+                result = self.env.play(action)
+                next_obs = result['next_state']
+                done = result['done']
+                if done and result['winner'] == -1: # tie
+                    reward = 0
+                elif done:
+                    reward = 1
+            except ValueError as ex:
+                # invalid move penalty
+                reward = -1
+                done = True
+                next_obs = obs
+            except Exception as ex:
+                raise ex
             observations.append(obs)
             actions.append(action)
             rewards.append(float(reward))
-            policies.append(masked_pi)
+            policies.append(pi)
 
             obs = next_obs
             step += 1
-
-        # Compute target values (z_t) backwards with alternating signs for 2-player zero-sum game
         game_len = len(observations)
         target_values = [0.0] * game_len
-        running_value = 0.0
-        for t in reversed(range(game_len)):
-            running_value = rewards[t] - self.discount * running_value
-            target_values[t] = running_value
+        target_values[-1] = rewards[-1]
+        if not is_game_aborted:
+            for t in reversed(range(game_len - 1)):
+                target_values[t] = rewards[t] - self.discount * target_values[t + 1]
 
         return {
             "observations": observations,
