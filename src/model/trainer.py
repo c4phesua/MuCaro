@@ -4,7 +4,6 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from environment.caro import Board
 from mcts.tree import MCTS
@@ -81,7 +80,7 @@ class MuCaroTrainer:
                 result = self.env.play(action)
                 next_obs = result['next_state']
                 done = result['done']
-                if done and result['winner'] == -1: # tie
+                if done and result['winner'] == -1:  # tie
                     reward = 0
                 elif done:
                     reward = 1
@@ -159,45 +158,12 @@ class MuCaroTrainer:
         self._set_train_mode()
         obs, actions, target_policies, target_values, target_rewards = self.sample_batch()
 
-        # Step k = 0: Initial inference from real board observation
-        hidden_state, pred_logits, pred_value = self.network.initial_inference(obs, training=True)
-
-        policy_loss = -(target_policies[:, 0] * F.log_softmax(pred_logits, dim=-1)).sum(dim=-1).mean()
-        value_loss = F.mse_loss(pred_value.squeeze(-1), target_values[:, 0])
-        reward_loss = torch.tensor(0.0)
-
-        # Steps k = 1 ... unroll_steps: Recurrent inference in latent space
-        for k in range(1, self.unroll_steps + 1):
-            # Scale hidden state gradient by 0.5 at each unroll step
-            hidden_state = hidden_state * 0.5 + hidden_state.detach() * 0.5
-
-            action_k = actions[:, k - 1]
-            hidden_state, pred_reward, pred_logits, pred_value = self.network.recurrent_inference(
-                hidden_state, action_k, training=True
-            )
-
-            policy_loss = policy_loss - (
-                    target_policies[:, k] * F.log_softmax(pred_logits, dim=-1)
-            ).sum(dim=-1).mean()
-            value_loss = value_loss + F.mse_loss(pred_value.squeeze(-1), target_values[:, k])
-            reward_loss = reward_loss + F.mse_loss(pred_reward.squeeze(-1), target_rewards[:, k - 1])
-
-        scale = 1.0 / self.unroll_steps
-        total_loss = (policy_loss + value_loss + reward_loss) * scale
-
-        self.optimizer.zero_grad()
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            [p for group in self.optimizer.param_groups for p in group["params"]], max_norm=5.0
-        )
-        self.optimizer.step()
-
-        return {
-            "total_loss": total_loss.item(),
-            "policy_loss": (policy_loss * scale).item(),
-            "value_loss": (value_loss * scale).item(),
-            "reward_loss": (reward_loss * scale).item(),
-        }
+        # return {
+        #     "total_loss": None,
+        #     "policy_loss": None,
+        #     "value_loss": None,
+        #     "reward_loss": None,
+        # }
 
     def run(
             self,
