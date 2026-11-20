@@ -143,7 +143,7 @@ class MuCaroTrainer:
             rewards_batch.append(rew_seq)
 
         return (
-            torch.tensor(np.array(obs_batch), dtype=torch.float32),
+            torch.stack(obs_batch).to(dtype=torch.float32),
             torch.tensor(np.array(actions_batch), dtype=torch.long),
             torch.tensor(np.array(policies_batch), dtype=torch.float32),
             torch.tensor(np.array(values_batch), dtype=torch.float32),
