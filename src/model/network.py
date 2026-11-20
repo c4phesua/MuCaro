@@ -17,6 +17,13 @@ class MuCaroNetwork:
         policy_logits, value = self.f_network(next_hidden, training=training)
         return next_hidden, reward, policy_logits, value
 
+    def params(self):
+        return (
+                list(self.h_network.parameters())
+                + list(self.f_network.parameters())
+                + list(self.g_network.parameters())
+        )
+
     @torch.no_grad()
     def verify_contract(self, obs_shape: tuple, action_space_size: int, device="cpu"):
         dummy_obs = torch.zeros((2, *obs_shape), dtype=torch.float32, device=device)

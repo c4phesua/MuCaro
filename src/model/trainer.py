@@ -4,6 +4,8 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
+from torch.nn.functional import cross_entropy, mse_loss
+from torch.nn.utils import clip_grad_norm_
 
 from environment.caro import Board
 from mcts.tree import MCTS
@@ -36,13 +38,7 @@ class MuCaroTrainer:
         self.num_simulations = num_simulations
         self.discount = discount
         self.temp_threshold = temp_threshold
-
-        params = (
-                list(self.network.h_network.parameters())
-                + list(self.network.f_network.parameters())
-                + list(self.network.g_network.parameters())
-        )
-        self.optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=weight_decay)
+        self.optimizer = torch.optim.AdamW(self.network.params(), lr=lr, weight_decay=weight_decay)
 
     def _set_eval_mode(self):
         self.network.h_network.eval()
@@ -154,16 +150,32 @@ class MuCaroTrainer:
         )
 
     def train_step(self) -> Dict[str, float]:
-        """Performs one K-step unroll and updates network weights."""
         self._set_train_mode()
         obs, actions, target_policies, target_values, target_rewards = self.sample_batch()
-
-        # return {
-        #     "total_loss": None,
-        #     "policy_loss": None,
-        #     "value_loss": None,
-        #     "reward_loss": None,
-        # }
+        init_hidden_states, init_pred_policies, init_pred_values = self.network.initial_inference(obs, training=True)
+        policy_loss = cross_entropy(init_pred_policies, target_policies[:, 0])
+        value_loss = mse_loss(init_pred_values.squeeze(-1), target_values[:, 0])
+        reward_loss = torch.tensor(0.0, dtype=torch.float32)
+        hidden_state = init_hidden_states
+        for k in range(1, self.unroll_steps + 1):
+            hidden_state = hidden_state * 0.5 + hidden_state.detach() * 0.5
+            hidden_state, pred_reward, pred_policy, pred_value = self.network.recurrent_inference(
+                hidden_state, actions[:, k - 1], training=True
+            )
+            policy_loss += cross_entropy(pred_policy, target_policies[:, k])
+            value_loss += mse_loss(pred_value.squeeze(-1), target_values[:, k])
+            reward_loss += mse_loss(pred_reward.squeeze(-1), target_rewards[:, k])
+        total_loss = (policy_loss + value_loss + reward_loss) / self.unroll_steps
+        self.optimizer.zero_grad()
+        total_loss.backward()
+        clip_grad_norm_(self.network.params(), max_norm=0.5)
+        self.optimizer.step()
+        return {
+            "total_loss": total_loss.item(),
+            "policy_loss": policy_loss.item() / self.unroll_steps,
+            "value_loss": value_loss.item() / self.unroll_steps,
+            "reward_loss": reward_loss.item() / self.unroll_steps,
+        }
 
     def run(
             self,
