@@ -1,5 +1,6 @@
 import os
-os.environ['KERAS_BACKEND']='torch'
+
+os.environ['KERAS_BACKEND'] = 'torch'
 
 import math
 
@@ -13,38 +14,32 @@ from src.mcts.tree import MCTS
 
 
 # ==========================================
-# 1. MOCK NETWORKS
+# 1. MOCK NETWORK
 # ==========================================
-class MockHNetwork:
-    """Mock for the Representation Network (h)"""
-
-    def __call__(self, state, training=False):
-        # Always return a dummy hidden_state with shape (1, 16)
-        return torch.zeros((1, 16))
-
-
-class MockFNetwork:
-    """Mock for the Prediction Network (f)"""
+class MockMuCaroNetwork:
+    """Mock for the combined MuCaroNetwork wrapper."""
 
     def __init__(self, action_space_size):
         self.action_space_size = action_space_size
 
-    def __call__(self, hidden_state, training=False):
-        # Return uniform policy and a constant value of 0.5
-        policy_logits = torch.zeros((1, self.action_space_size))
-        value = torch.tensor([[0.5]])
-        return policy_logits, value
+    def initial_inference(self, current_state, training=False):
+        """Mocks initial_inference: Returns (hidden_state, policy_logits, value)"""
+        batch_size = current_state.shape[0]
+        hidden_state = torch.zeros((batch_size, 64))
+        policy_logits = torch.zeros((batch_size, self.action_space_size))
+        value = torch.tensor([[0.5]] * batch_size)
 
+        return hidden_state, policy_logits, value
 
-class MockGNetwork:
-    """Mock for the Dynamics Network (g)"""
+    def recurrent_inference(self, hidden_state, action, training=False):
+        """Mocks recurrent_inference: Returns (next_hidden, reward, policy_logits, value)"""
+        batch_size = hidden_state.shape[0]
+        next_hidden = torch.ones((batch_size, 64))
+        reward = torch.tensor([[1.0]] * batch_size)
+        policy_logits = torch.zeros((batch_size, self.action_space_size))
+        value = torch.tensor([[0.5]] * batch_size)
 
-    def __call__(self, inputs, training=False):
-        hidden_state, action_tensor = inputs
-        # Return a dummy next_hidden_state and a reward of 1.0
-        next_hidden = torch.ones((1, 16))
-        reward = torch.tensor([[1.0]])
-        return next_hidden, reward
+        return next_hidden, reward, policy_logits, value
 
 
 # ==========================================
@@ -54,14 +49,10 @@ class MockGNetwork:
 def mcts_env():
     """Initialize a basic test environment with action_space_size = 9"""
     action_space_size = 9
-    h_net = MockHNetwork()
-    f_net = MockFNetwork(action_space_size)
-    g_net = MockGNetwork()
+    mock_net = MockMuCaroNetwork(action_space_size)
 
     mcts = MCTS(
-        h_network=h_net,
-        f_network=f_net,
-        g_network=g_net,
+        network=mock_net,
         action_space_size=action_space_size
     )
     return mcts, action_space_size
@@ -74,7 +65,7 @@ def mcts_env():
 def test_initialization(mcts_env):
     """Test MCTS initialization parameters."""
     mcts, action_space_size = mcts_env
-    assert mcts.action_space_size == 9
+    assert mcts.action_space_size == action_space_size
     assert math.isclose(mcts.root_dirichlet_alpha, 0.03, abs_tol=1e-3)
     assert mcts.gamma == 1.0
 
@@ -97,7 +88,7 @@ def test_cal_distribution(mcts_env):
 
     dist = mcts.cal_distribution(root, num_simulations=100)
 
-    assert len(dist) == 9
+    assert len(dist) == action_space_size
     assert math.isclose(sum(dist), 1.0, abs_tol=1e-6)  # The distribution must sum to 1.0
     assert dist[0] == 0.1
     assert dist[3] == 0.2
@@ -106,6 +97,7 @@ def test_cal_distribution(mcts_env):
 
 
 def test_add_exploration_noise(mcts_env):
+    """Test if Dirichlet noise is added correctly to the root node's priors."""
     mcts, action_space_size = mcts_env
     root = Node(action=-1, action_space_size=action_space_size)
 
@@ -128,16 +120,16 @@ def test_select_child_and_ucb(mcts_env):
     root.visit_count = 10
     minmax_norm = MinMaxStats(-1, 1)
 
-    # Create 2 child nodes
+    # Create 2 mock child nodes
     child1 = Node(action=0, action_space_size=action_space_size, prior=0.5)
     child1.visit_count = 5
     child1.reward = 1.0
-    child1.value_sum = 2.5  # value() = 0.5
+    child1.value_sum = 2.5  # node.value() will be 2.5 / 5 = 0.5
 
     child2 = Node(action=1, action_space_size=action_space_size, prior=0.5)
     child2.visit_count = 1
     child2.reward = 0.0
-    child2.value_sum = -0.5  # value() = -0.5
+    child2.value_sum = -0.5  # node.value() will be -0.5 / 1 = -0.5
 
     root.children[0] = child1
     root.children[1] = child2
@@ -151,8 +143,10 @@ def test_select_child_and_ucb(mcts_env):
 def test_full_simulate_workflow(mcts_env):
     """Test the full Simulation workflow (Integration)."""
     mcts, action_space_size = mcts_env
-    # Dummy input board (Caro 15x15 format)
-    dummy_state = torch.zeros((1, 3, 15, 15))
+
+    # Dummy input board (Caro 15x15 format).
+    # Shape is (C, H, W) because your MCTS applies unsqueeze(0) internally
+    dummy_state = torch.zeros((3, 15, 15))
 
     # Run MCTS with 50 simulations
     pi_distribution = mcts.simulate(
@@ -167,14 +161,16 @@ def test_full_simulate_workflow(mcts_env):
     # 2. The distribution must sum to 1.0
     assert math.isclose(sum(pi_distribution), 1.0, abs_tol=1e-5)
 
-    # 3. Ensure all values are >= 0
+    # 3. Ensure all probabilities are >= 0
     assert all(prob >= 0.0 for prob in pi_distribution)
 
 
 def test_simulate_validation(mcts_env):
-    """Test exceptions in the simulate function."""
+    """Test exception raising in the simulate function."""
     mcts, _ = mcts_env
-    dummy_state = torch.zeros((1, 3, 15, 15))
+
+    # Shape is (C, H, W)
+    dummy_state = torch.zeros((3, 15, 15))
 
     # Must raise ValueError if num_simulations <= 0
     with pytest.raises(ValueError, match="Number of simulation must greater than 0"):
