@@ -1,3 +1,4 @@
+import math
 import unittest
 from unittest.mock import MagicMock, patch
 import numpy as np
@@ -96,7 +97,6 @@ class DummyNetwork(nn.Module):
 
     def initial_inference(self, obs, training=False):
         batch_size = obs.shape[0]
-        # Connect obs -> hidden_state -> policy & value with non-zero multipliers
         obs_mean = obs.view(batch_size, -1).mean(dim=-1, keepdim=True) + 1.0
         hidden_state = obs_mean.expand(batch_size, self.hidden_dim) * self.h_param
         pred_policies = hidden_state.mean(dim=-1, keepdim=True).expand(
@@ -154,7 +154,6 @@ class TestMuCaroTrainer(unittest.TestCase):
         """Verify reward assignment and alternating zero-sum value discounting on a win."""
         game_data = self.trainer.self_play_game()
 
-        # Ensure sub-networks switched to eval mode during self-play
         self.network.h_network.eval.assert_called()
         self.network.f_network.eval.assert_called()
         self.network.g_network.eval.assert_called()
@@ -218,8 +217,8 @@ class TestMuCaroTrainer(unittest.TestCase):
              patch('numpy.argmax', return_value=5) as mock_argmax:
             game_data = self.trainer.self_play_game()
 
-        self.assertEqual(mock_choice.call_count, 2)  # steps 0 and 1
-        self.assertEqual(mock_argmax.call_count, 2)  # steps 2 and 3
+        self.assertEqual(mock_choice.call_count, 2)
+        self.assertEqual(mock_argmax.call_count, 2)
         self.assertEqual(game_data["actions"], [2, 2, 5, 5])
 
     def test_self_play_reraises_unexpected_exception(self):
@@ -234,7 +233,7 @@ class TestMuCaroTrainer(unittest.TestCase):
 
     def test_replay_buffer_maxlen_eviction(self):
         """Verify replay buffer enforces maxlen and evicts oldest games."""
-        for idx in range(25):  # buffer_size = 20
+        for idx in range(25):
             self.trainer.replay_buffer.append({"game_id": idx})
 
         self.assertEqual(len(self.trainer.replay_buffer), 20)
@@ -261,11 +260,9 @@ class TestMuCaroTrainer(unittest.TestCase):
         for _ in range(6):
             self.trainer.replay_buffer.append(short_game)
 
-        # Force start_idx = 0 so steps k=0,1 are real and k=2,3 are padded
         with patch('random.randint', return_value=0):
             obs_b, act_b, pol_b, val_b, rew_b = self.trainer.sample_batch()
 
-        # batch_size = 4, unroll_steps = 3 -> seq_len = 4
         self.assertEqual(obs_b.shape, (4, *self.obs_shape))
         self.assertEqual(act_b.shape, (4, 4))
         self.assertEqual(pol_b.shape, (4, 4, self.action_space_size))
@@ -278,21 +275,198 @@ class TestMuCaroTrainer(unittest.TestCase):
         self.assertEqual(val_b.dtype, torch.float32)
         self.assertEqual(rew_b.dtype, torch.float32)
 
-        # Real trajectory steps
         self.assertTrue(torch.all(act_b[:, 0] == 3))
         self.assertTrue(torch.all(act_b[:, 1] == 7))
         self.assertTrue(torch.allclose(rew_b[:, 1], torch.tensor(1.0)))
         self.assertTrue(torch.allclose(val_b[:, 1], torch.tensor(1.0)))
 
-        # Absorbing padded steps (k = 2, 3)
         self.assertTrue(torch.all(act_b[:, 2:] == 0))
         self.assertTrue(torch.all(pol_b[:, 2:, :] == 0.0))
         self.assertTrue(torch.all(val_b[:, 2:] == 0.0))
         self.assertTrue(torch.all(rew_b[:, 2:] == 0.0))
 
     # --------------------------------------------------------------------------
-    # Training Step & BPTT Gradient Tests
+    # Training Step Mathematical & Computation Tests
     # --------------------------------------------------------------------------
+
+    def test_train_step_exact_loss_and_reward_k_minus_1_alignment(self):
+        """
+        Verify exact analytical loss values for policy, value, and reward heads,
+        specifically ensuring reward at unroll step k aligns with target_rewards[:, k - 1].
+        """
+        self.trainer.unroll_steps = 2
+        batch_size = 2
+        num_actions = 3
+
+        obs = torch.zeros((batch_size, 2, 9), dtype=torch.float32)
+        actions = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
+
+        # One-hot target policies across k = 0, 1, 2
+        target_policies = torch.tensor([
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        ], dtype=torch.float32)
+
+        # Target values across k = 0, 1, 2
+        target_values = torch.tensor([
+            [1.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+        ], dtype=torch.float32)
+
+        # Target rewards: k=0 -> 1.0, k=1 -> 0.5, k=2 -> 999.0 (sentinel that must NOT be used)
+        target_rewards = torch.tensor([
+            [1.0, 0.5, 999.0],
+            [1.0, 0.5, 999.0],
+        ], dtype=torch.float32)
+
+        # Controlled network outputs: all zeros (connected to dummy_param so backward() succeeds)
+        dummy_w = self.network.h_param
+
+        def mock_init(x, training=False):
+            h = torch.zeros((batch_size, 8)) * dummy_w
+            p = torch.zeros((batch_size, num_actions)) * dummy_w
+            v = torch.zeros((batch_size, 1)) * dummy_w
+            return h, p, v
+
+        def mock_rec(h, a, training=False):
+            nh = h * dummy_w
+            r = torch.zeros((batch_size, 1)) * dummy_w
+            p = torch.zeros((batch_size, num_actions)) * dummy_w
+            v = torch.zeros((batch_size, 1)) * dummy_w
+            return nh, r, p, v
+
+        with patch.object(
+            self.trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards)
+        ), patch.object(
+            self.network, 'initial_inference', side_effect=mock_init
+        ), patch.object(
+            self.network, 'recurrent_inference', side_effect=mock_rec
+        ):
+            metrics = self.trainer.train_step()
+
+        # Analytical expectations (divided by unroll_steps = 2):
+        # 1. Policy: 3 steps (k=0,1,2) of uniform zero logits vs one-hot -> 3 * ln(3) / 2
+        expected_policy_loss = (3.0 * math.log(3.0)) / 2.0
+
+        # 2. Value: MSE(0, 1.0) + MSE(0, -1.0) + MSE(0, 0.0) = (1.0 + 1.0 + 0.0) / 2 = 1.0
+        expected_value_loss = 1.0
+
+        # 3. Reward: MSE(0, target_rewards[:, 0]=1.0) + MSE(0, target_rewards[:, 1]=0.5)
+        #            = (1.0^2 + 0.5^2) / 2 = 1.25 / 2 = 0.625
+        expected_reward_loss = 0.625
+        expected_total_loss = expected_policy_loss + expected_value_loss + expected_reward_loss
+
+        self.assertAlmostEqual(metrics["policy_loss"], expected_policy_loss, places=5)
+        self.assertAlmostEqual(metrics["value_loss"], expected_value_loss, places=5)
+        self.assertAlmostEqual(metrics["reward_loss"], expected_reward_loss, places=5)
+        self.assertAlmostEqual(metrics["total_loss"], expected_total_loss, places=5)
+
+    def test_train_step_unroll_action_sequence_alignment(self):
+        """Verify recurrent_inference receives actions[:, k - 1] in exact sequential order."""
+        self.trainer.unroll_steps = 3
+        obs = torch.zeros((2, 2, 9), dtype=torch.float32)
+        actions = torch.tensor([[1, 4, 7, 0], [2, 5, 8, 0]], dtype=torch.long)
+        target_policies = torch.full((2, 4, 9), 1.0 / 9.0, dtype=torch.float32)
+        target_values = torch.zeros((2, 4), dtype=torch.float32)
+        target_rewards = torch.zeros((2, 4), dtype=torch.float32)
+
+        received_actions = []
+        orig_rec = self.network.recurrent_inference
+
+        def spy_recurrent(h, a, training=False):
+            received_actions.append(a.clone())
+            return orig_rec(h, a, training=training)
+
+        with patch.object(
+            self.trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards)
+        ), patch.object(
+            self.network, 'recurrent_inference', side_effect=spy_recurrent
+        ):
+            self.trainer.train_step()
+
+        self.assertEqual(len(received_actions), 3)
+        self.assertTrue(torch.equal(received_actions[0], torch.tensor([1, 2], dtype=torch.long)))
+        self.assertTrue(torch.equal(received_actions[1], torch.tensor([4, 5], dtype=torch.long)))
+        self.assertTrue(torch.equal(received_actions[2], torch.tensor([7, 8], dtype=torch.long)))
+
+    def test_train_step_hidden_state_half_gradient_scaling(self):
+        """
+        Verify `hidden_state = hidden_state * 0.5 + hidden_state.detach() * 0.5`
+        attenuates gradients flowing back to initial_inference by 0.5^k per unroll step.
+        """
+        self.trainer.unroll_steps = 2
+        with torch.no_grad():
+            self.network.h_param.copy_(torch.tensor([0.1]))
+
+        obs = torch.zeros((1, 2, 9), dtype=torch.float32)
+        actions = torch.zeros((1, 3), dtype=torch.long)
+        target_policies = torch.full((1, 3, 9), 1.0 / 9.0, dtype=torch.float32)
+        target_values = torch.zeros((1, 3), dtype=torch.float32)
+        target_rewards = torch.zeros((1, 3), dtype=torch.float32)
+
+        call_idx = {"step": 0}
+
+        def custom_init(x, training=False):
+            # h0 = 1.0 * h_param = 0.1; policy & value have no dependency on h_param
+            h0 = torch.ones((1, 1)) * self.network.h_param
+            p0 = torch.zeros((1, 9))
+            v0 = torch.zeros((1, 1))
+            return h0, p0, v0
+
+        def custom_rec(h, a, training=False):
+            call_idx["step"] += 1
+            # Identity transition so only the 0.5 scaling affects gradient magnitude
+            nh = h
+            # Isolate reward loss strictly at unroll step k = 2
+            r = nh if call_idx["step"] == 2 else torch.zeros((1, 1))
+            p = torch.zeros((1, 9))
+            v = torch.zeros((1, 1))
+            return nh, r, p, v
+
+        with patch.object(
+            self.trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards)
+        ), patch.object(
+            self.network, 'initial_inference', side_effect=custom_init
+        ), patch.object(
+            self.network, 'recurrent_inference', side_effect=custom_rec
+        ):
+            self.trainer.train_step()
+
+        # Analytical gradient derivation:
+        # total_loss = (const_policy + const_value + MSE(h2, 0)) / 2
+        # d(total_loss)/d(h2) = d(h2^2 / 2)/d(h2) = h2 = 0.1
+        # Two unroll steps apply 0.5 scaling twice: dh2/dh0 = 0.5 * 0.5 = 0.25
+        # Expected grad = 0.1 * 0.25 = 0.025 (well below clip_grad_norm_ max_norm=0.5)
+        self.assertAlmostEqual(self.network.h_param.grad.item(), 0.025, places=6)
+
+    def test_train_step_gradient_clipping_enforced(self):
+        """Verify clip_grad_norm_(max_norm=0.5) caps exploding gradients."""
+        obs = torch.ones((4, 2, 9), dtype=torch.float32)
+        actions = torch.zeros((4, 4), dtype=torch.long)
+        target_policies = torch.full((4, 4, 9), 1.0 / 9.0, dtype=torch.float32)
+        # Large target values to induce huge raw gradients >> 0.5
+        target_values = torch.full((4, 4), 1000.0, dtype=torch.float32)
+        target_rewards = torch.full((4, 4), 1000.0, dtype=torch.float32)
+
+        with patch.object(
+            self.trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards)
+        ):
+            self.trainer.train_step()
+
+        total_grad_norm = torch.sqrt(
+            sum(p.grad.detach().pow(2).sum() for p in self.network.params() if p.grad is not None)
+        ).item()
+
+        self.assertLessEqual(total_grad_norm, 0.5 + 1e-5)
+        self.assertGreater(total_grad_norm, 0.49)
 
     def test_train_step_updates_all_networks_with_valid_gradients(self):
         """
@@ -316,6 +490,13 @@ class TestMuCaroTrainer(unittest.TestCase):
             self.assertIsInstance(metrics[key], float)
             self.assertFalse(np.isnan(metrics[key]))
             self.assertFalse(np.isinf(metrics[key]))
+
+        # Verify total_loss equals sum of normalized component losses
+        self.assertAlmostEqual(
+            metrics["total_loss"],
+            metrics["policy_loss"] + metrics["value_loss"] + metrics["reward_loss"],
+            places=6
+        )
 
         # Verify non-zero gradients flowed through the entire unrolled computation graph
         self.assertIsNotNone(self.network.h_param.grad)
@@ -348,9 +529,6 @@ class TestMuCaroTrainer(unittest.TestCase):
             min_buffer_size=4
         )
 
-        # Iter 1: 2 games (< 4) -> skipped
-        # Iter 2: 4 games (>= 4) -> trained
-        # Iter 3: 6 games (>= 4) -> trained
         self.assertEqual(len(self.trainer.replay_buffer), 6)
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0]["iteration"], 2)
