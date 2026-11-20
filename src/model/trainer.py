@@ -85,6 +85,7 @@ class MuCaroTrainer:
                 reward = -1
                 done = True
                 next_obs = obs
+                is_game_aborted = True
             except Exception as ex:
                 raise ex
             observations.append(obs)
