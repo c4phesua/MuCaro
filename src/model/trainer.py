@@ -61,9 +61,8 @@ class MuCaroTrainer:
         is_game_aborted = False
 
         while not done:
-            obs_tensor = torch.tensor(obs, dtype=torch.float32)
             pi = self.mcts.simulate(
-                current_state=obs_tensor,
+                current_state=obs,
                 num_simulations=self.num_simulations,
                 is_training=True,
             )
@@ -165,7 +164,7 @@ class MuCaroTrainer:
             )
             policy_loss += cross_entropy(pred_policy, target_policies[:, k])
             value_loss += mse_loss(pred_value.squeeze(-1), target_values[:, k])
-            reward_loss += mse_loss(pred_reward.squeeze(-1), target_rewards[:, k])
+            reward_loss += mse_loss(pred_reward.squeeze(-1), target_rewards[:, k - 1])
         total_loss = (policy_loss + value_loss + reward_loss) / self.unroll_steps
         self.optimizer.zero_grad()
         total_loss.backward()
