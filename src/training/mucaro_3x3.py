@@ -1,6 +1,6 @@
 import torch
 from keras import Model, Input, Sequential
-from keras.src.layers import Dense, Flatten, LayerNormalization, Concatenate
+from keras.src.layers import Dense, Flatten, LayerNormalization, Concatenate, Embedding
 
 from environment.caro import Board
 from mcts.tree import MCTS
@@ -31,7 +31,9 @@ mu_network.f_network = Model(inputs=f_input, outputs=[f_policy_layers, f_value_l
 
 g_latent_input = Input(shape=(32,))
 g_action_input = Input(shape=(1,), dtype=torch.long)
-g_layers = Concatenate()([g_latent_input, g_action_input])
+g_action_embedding = Embedding(input_dim=9, output_dim=16)(g_action_input)
+g_action_embedding = Flatten()(g_action_embedding)
+g_layers = Concatenate()([g_latent_input, g_action_embedding])
 
 g_latent_layers = Dense(64, activation='silu')(g_layers)
 g_latent_layers = Dense(32, activation='linear')(g_latent_layers)
