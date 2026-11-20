@@ -1,19 +1,17 @@
 import math
-from typing import List, Optional
+from typing import List
 
 import numpy as np
 import torch
-from keras import Model
 
+from model.network import MuCaroNetwork
 from src.mcts.minmax import MinMaxStats
 from src.mcts.node import Node
 
 
 class MCTS:
-    def __init__(self, h_network, f_network, g_network, action_space_size: int):
-        self.h_network: Model = h_network
-        self.f_network: Model = f_network
-        self.g_network: Model = g_network
+    def __init__(self, network: MuCaroNetwork, action_space_size: int):
+        self.network: MuCaroNetwork = network
         self.gamma: float = 1.0
         self.pb_c_base: float = 19652.0
         self.pb_c_init: float = 1.25
@@ -25,9 +23,9 @@ class MCTS:
         if num_simulations <= 0:
             raise ValueError("Number of simulation must greater than 0")
         minmax_norm = MinMaxStats(-1, 1)
+        current_state = current_state.unsqueeze(0)
         with torch.no_grad():
-            hidden_state = self.h_network(current_state, training=False)
-            policy, _ = self.f_network(hidden_state, training=False)
+            hidden_state, policy, _ = self.network.initial_inference(current_state)
             priors = torch.softmax(policy, dim=-1).squeeze(0).cpu().tolist()
             root = Node(action=-1, action_space_size=self.action_space_size)
             root.hidden_state = hidden_state
@@ -44,14 +42,13 @@ class MCTS:
                     visited_history.append(current_child)
                 parent_state = visited_history[-2].hidden_state
                 action_tensor = torch.tensor([current_child.action], dtype=torch.long)
-                hidden_state, reward = self.g_network([parent_state, action_tensor], training=False)
-                policy, leaf_value = self.f_network(hidden_state, training=False)
+                hidden_state, reward, policy, leaf_value = self.network.recurrent_inference(parent_state, action_tensor)
                 current_child.hidden_state = hidden_state
-                current_child.reward = reward.item()
+                current_child.reward = reward.squeeze(-1)[0].item()
                 priors = torch.softmax(policy, dim=-1).squeeze(0).cpu().tolist()
                 for action in range(self.action_space_size):
                     current_child.children[action] = Node(action, self.action_space_size, prior=priors[action])
-                update_value = leaf_value.item()
+                update_value = leaf_value.squeeze(-1)[0].item()
                 for visited_node in reversed(visited_history):
                     visited_node.visit_count += 1
                     visited_node.value_sum += update_value
@@ -81,7 +78,7 @@ class MCTS:
                 q_value = child.reward + self.gamma * -child.value()
                 q_value = min_max_stats.normalize(q_value)
             else:
-                q_value = 0
+                q_value = min_max_stats.normalize(0.0)
             prior_value = c * child.prior * (math.sqrt(parent.visit_count) / (1 + child.visit_count))
             scores[i] = q_value + prior_value
         return scores
