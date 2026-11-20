@@ -291,7 +291,7 @@ class TestMuCaroTrainer(unittest.TestCase):
 
     def test_train_step_exact_loss_and_reward_k_minus_1_alignment(self):
         """
-        Verify exact analytical loss values for policy, value, and reward heads,
+        Verify exact analytical loss values scaled by 1 / (unroll_steps + 1),
         specifically ensuring reward at unroll step k aligns with target_rewards[:, k - 1].
         """
         self.trainer.unroll_steps = 2
@@ -336,9 +336,9 @@ class TestMuCaroTrainer(unittest.TestCase):
             return nh, r, p, v
 
         with patch.object(
-            self.trainer,
-            'sample_batch',
-            return_value=(obs, actions, target_policies, target_values, target_rewards)
+                self.trainer,
+                'sample_batch',
+                return_value=(obs, actions, target_policies, target_values, target_rewards)
         ), patch.object(
             self.network, 'initial_inference', side_effect=mock_init
         ), patch.object(
@@ -346,16 +346,16 @@ class TestMuCaroTrainer(unittest.TestCase):
         ):
             metrics = self.trainer.train_step()
 
-        # Analytical expectations (divided by unroll_steps = 2):
-        # 1. Policy: 3 steps (k=0,1,2) of uniform zero logits vs one-hot -> 3 * ln(3) / 2
-        expected_policy_loss = (3.0 * math.log(3.0)) / 2.0
+        # Analytical expectations with fraction = 1 / (unroll_steps + 1) = 1 / 3:
+        # 1. Policy: 3 steps (k=0,1,2) of uniform zero logits vs one-hot -> (3 * ln(3)) / 3
+        expected_policy_loss = (3.0 * math.log(3.0)) / 3.0
 
-        # 2. Value: MSE(0, 1.0) + MSE(0, -1.0) + MSE(0, 0.0) = (1.0 + 1.0 + 0.0) / 2 = 1.0
-        expected_value_loss = 1.0
+        # 2. Value: (MSE(0, 1.0) + MSE(0, -1.0) + MSE(0, 0.0)) / 3 = (1.0 + 1.0 + 0.0) / 3
+        expected_value_loss = 2.0 / 3.0
 
-        # 3. Reward: MSE(0, target_rewards[:, 0]=1.0) + MSE(0, target_rewards[:, 1]=0.5)
-        #            = (1.0^2 + 0.5^2) / 2 = 1.25 / 2 = 0.625
-        expected_reward_loss = 0.625
+        # 3. Reward: (MSE(0, target_rewards[:, 0]=1.0) + MSE(0, target_rewards[:, 1]=0.5)) / 3
+        #            = (1.0^2 + 0.5^2) / 3 = 1.25 / 3
+        expected_reward_loss = 1.25 / 3.0
         expected_total_loss = expected_policy_loss + expected_value_loss + expected_reward_loss
 
         self.assertAlmostEqual(metrics["policy_loss"], expected_policy_loss, places=5)
@@ -380,9 +380,9 @@ class TestMuCaroTrainer(unittest.TestCase):
             return orig_rec(h, a, training=training)
 
         with patch.object(
-            self.trainer,
-            'sample_batch',
-            return_value=(obs, actions, target_policies, target_values, target_rewards)
+                self.trainer,
+                'sample_batch',
+                return_value=(obs, actions, target_policies, target_values, target_rewards)
         ), patch.object(
             self.network, 'recurrent_inference', side_effect=spy_recurrent
         ):
@@ -428,9 +428,9 @@ class TestMuCaroTrainer(unittest.TestCase):
             return nh, r, p, v
 
         with patch.object(
-            self.trainer,
-            'sample_batch',
-            return_value=(obs, actions, target_policies, target_values, target_rewards)
+                self.trainer,
+                'sample_batch',
+                return_value=(obs, actions, target_policies, target_values, target_rewards)
         ), patch.object(
             self.network, 'initial_inference', side_effect=custom_init
         ), patch.object(
@@ -438,12 +438,13 @@ class TestMuCaroTrainer(unittest.TestCase):
         ):
             self.trainer.train_step()
 
-        # Analytical gradient derivation:
-        # total_loss = (const_policy + const_value + MSE(h2, 0)) / 2
-        # d(total_loss)/d(h2) = d(h2^2 / 2)/d(h2) = h2 = 0.1
+        # Analytical gradient derivation with fraction = 1 / (unroll_steps + 1) = 1 / 3:
+        # total_loss = (const_policy + const_value + MSE(h2, 0)) / 3
+        # d(total_loss)/d(h2) = (2 * h2) / 3 = (2 * 0.1) / 3
         # Two unroll steps apply 0.5 scaling twice: dh2/dh0 = 0.5 * 0.5 = 0.25
-        # Expected grad = 0.1 * 0.25 = 0.025 (well below clip_grad_norm_ max_norm=0.5)
-        self.assertAlmostEqual(self.network.h_param.grad.item(), 0.025, places=6)
+        # Expected grad = (2 * 0.1 / 3) * 0.25 = 0.05 / 3.0 (~0.016667)
+        expected_grad = (2.0 * 0.1 / 3.0) * 0.25
+        self.assertAlmostEqual(self.network.h_param.grad.item(), expected_grad, places=6)
 
     def test_train_step_gradient_clipping_enforced(self):
         """Verify clip_grad_norm_(max_norm=0.5) caps exploding gradients."""

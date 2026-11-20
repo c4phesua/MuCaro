@@ -165,16 +165,17 @@ class MuCaroTrainer:
             policy_loss += cross_entropy(pred_policy, target_policies[:, k])
             value_loss += mse_loss(pred_value.squeeze(-1), target_values[:, k])
             reward_loss += mse_loss(pred_reward.squeeze(-1), target_rewards[:, k - 1])
-        total_loss = (policy_loss + value_loss + reward_loss) / self.unroll_steps
+        fraction = 1 / (self.unroll_steps + 1)
+        total_loss = (policy_loss + value_loss + reward_loss) * fraction
         self.optimizer.zero_grad()
         total_loss.backward()
         clip_grad_norm_(self.network.params(), max_norm=0.5)
         self.optimizer.step()
         return {
             "total_loss": total_loss.item(),
-            "policy_loss": policy_loss.item() / self.unroll_steps,
-            "value_loss": value_loss.item() / self.unroll_steps,
-            "reward_loss": reward_loss.item() / self.unroll_steps,
+            "policy_loss": policy_loss.item() * fraction,
+            "value_loss": value_loss.item() * fraction,
+            "reward_loss": reward_loss.item() * fraction,
         }
 
     def run(
