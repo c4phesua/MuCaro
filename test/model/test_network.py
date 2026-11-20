@@ -120,3 +120,31 @@ def test_verify_contract_failure(setup_network):
 
     with pytest.raises(AssertionError, match="Value shape expected"):
         net.verify_contract(obs_shape, action_space_size)
+
+
+def test_params_method(setup_network):
+    """Tests if the params method correctly aggregates parameters from all sub-networks."""
+    net, _, _, _ = setup_network
+
+    # Get the parameter list from the custom method
+    params_list = net.params()
+
+    # Manually aggregate the expected parameters
+    expected_params = (
+            list(net.h_network.parameters()) +
+            list(net.f_network.parameters()) +
+            list(net.g_network.parameters())
+    )
+
+    # Validate that it returns a list
+    assert isinstance(params_list, list), "The params() method should return a list."
+
+    # Ensure the list is not empty (since our mocks have actual layers)
+    assert len(params_list) > 0, "The parameter list should not be empty."
+
+    # Validate the total count matches
+    assert len(params_list) == len(expected_params), "Mismatch in total number of parameters."
+
+    # Validate that the actual parameter objects are exactly the same (by identity)
+    for actual_param, expected_param in zip(params_list, expected_params):
+        assert actual_param is expected_param, "A parameter in the returned list does not match the expected parameter."
