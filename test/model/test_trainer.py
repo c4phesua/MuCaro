@@ -702,3 +702,70 @@ def test_run_loop_triggers_save_checkpoint_after_eval(mock_save_checkpoint, trai
         iteration=2,
         save_dir="./out_checkpoints"
     )
+
+
+def test_set_eval_and_train_mode_helpers(trainer):
+    """Verify _set_eval_mode and _set_train_mode toggle all three sub-networks."""
+    trainer._set_eval_mode()
+    trainer.network.h_network.eval.assert_called_once()
+    trainer.network.f_network.eval.assert_called_once()
+    trainer.network.g_network.eval.assert_called_once()
+
+    trainer._set_train_mode()
+    trainer.network.h_network.train.assert_called_once()
+    trainer.network.f_network.train.assert_called_once()
+    trainer.network.g_network.train.assert_called_once()
+
+
+@patch('model.trainer.save_checkpoint')
+def test_run_loop_sets_eval_mode_before_evaluator(mock_save_checkpoint, trainer):
+    """
+    Verify that run() switches all sub-networks back to eval mode after train_step()
+    and immediately before invoking the evaluator, while leaving them in train mode
+    on non-evaluation iterations.
+    """
+    active_modes = {"h": None, "f": None, "g": None}
+    modes_during_eval = []
+
+    trainer.network.h_network.eval.side_effect = lambda: active_modes.update({"h": "eval"})
+    trainer.network.f_network.eval.side_effect = lambda: active_modes.update({"f": "eval"})
+    trainer.network.g_network.eval.side_effect = lambda: active_modes.update({"g": "eval"})
+
+    trainer.network.h_network.train.side_effect = lambda: active_modes.update({"h": "train"})
+    trainer.network.f_network.train.side_effect = lambda: active_modes.update({"f": "train"})
+    trainer.network.g_network.train.side_effect = lambda: active_modes.update({"g": "train"})
+
+    def spy_evaluator(mcts, env, step_num):
+        # Capture the exact network modes active when evaluator executes
+        modes_during_eval.append(active_modes.copy())
+        return {'win': 5, 'lose': 5, 'tie': 0, 'win_percentage': 0.5}
+
+    # Iteration 1: trains only (no eval) -> networks remain in 'train' mode at end of iter
+    trainer.run(
+        evaluator=spy_evaluator,
+        checkpoint_path="./dummy_checkpoints",
+        model_name="dummy_model",
+        evaluation_steps=10,
+        eval_interval=2,
+        num_iterations=1,
+        games_per_iter=1,
+        train_steps_per_iter=1,
+        min_buffer_size=1
+    )
+    assert len(modes_during_eval) == 0
+    assert active_modes == {"h": "train", "f": "train", "g": "train"}
+
+    # Iteration 2: triggers eval -> networks must switch from 'train' to 'eval' before evaluator runs
+    trainer.run(
+        evaluator=spy_evaluator,
+        checkpoint_path="./dummy_checkpoints",
+        model_name="dummy_model",
+        evaluation_steps=10,
+        eval_interval=1,
+        num_iterations=1,
+        games_per_iter=1,
+        train_steps_per_iter=1,
+        min_buffer_size=1
+    )
+    assert len(modes_during_eval) == 1
+    assert modes_during_eval[0] == {"h": "eval", "f": "eval", "g": "eval"}

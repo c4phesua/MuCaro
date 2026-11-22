@@ -213,6 +213,7 @@ class MuCaroTrainer:
                     iter_metrics[key] += metrics[key] / train_steps_per_iter
             iter_metrics['eval'] = None
             if iteration % eval_interval == 0:
+                self._set_eval_mode()
                 eval_result = evaluator(mcts=self.mcts, env=self.env, step_num=evaluation_steps)
                 iter_metrics['eval'] = eval_result
                 save_checkpoint(mcts=self.mcts, optimizer=self.optimizer, board_size=self.env.size,
