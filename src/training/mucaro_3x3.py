@@ -53,5 +53,8 @@ if __name__ == '__main__':
     env = Board()
     mcts = MCTS(network=mu_network, action_space_size=9)
     mcts.gamma = GAMMA
-    trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts, discount=GAMMA, temp_threshold=2)
-    trainer.run(evaluator=random_evaluator, num_iterations=500, model_name='3x3-v1', checkpoint_path='D:\\Code\\Python\\mucaro\\checkpoints')
+    mcts.root_dirichlet_alpha = 0.8
+    trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts,
+                            discount=GAMMA, temp_threshold=2, buffer_size=10000, lr=1e-3)
+    trainer.run(evaluator=random_evaluator, num_iterations=500, train_steps_per_iter=10,
+                model_name='3x3-v1', checkpoint_path='D:\\Code\\Python\\mucaro\\checkpoints')
