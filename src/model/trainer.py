@@ -10,6 +10,7 @@ from torch.nn.utils import clip_grad_norm_
 from environment.caro import Board
 from mcts.tree import MCTS
 from model.network import MuCaroNetwork
+from model.utils import save_checkpoint
 
 
 class MuCaroTrainer:
@@ -183,6 +184,8 @@ class MuCaroTrainer:
     def run(
             self,
             evaluator,
+            checkpoint_path: str,
+            model_name: str,
             evaluation_steps: int = 50,
             eval_interval: int = 10,
             num_iterations: int = 100,
@@ -212,6 +215,10 @@ class MuCaroTrainer:
             if iteration % eval_interval == 0:
                 eval_result = evaluator(mcts=self.mcts, env=self.env, step_num=evaluation_steps)
                 iter_metrics['eval'] = eval_result
+                save_checkpoint(network=self.network, optimizer=self.optimizer,
+                                action_space_size=self.mcts.action_space_size, board_size=self.env.size,
+                                eval_stats=eval_result, model_name=model_name, iteration=iteration,
+                                save_dir=checkpoint_path)
 
             iter_metrics["iteration"] = iteration
             iter_metrics["buffer_size"] = len(self.replay_buffer)

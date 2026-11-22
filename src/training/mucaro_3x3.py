@@ -3,6 +3,7 @@ from keras import Model, Input, Sequential
 from keras.src.layers import Dense, Flatten, LayerNormalization, Concatenate, Embedding
 
 from environment.caro import Board
+from environment.eval import random_evaluator
 from mcts.tree import MCTS
 from model.network import MuCaroNetwork
 from model.trainer import MuCaroTrainer
@@ -53,4 +54,4 @@ if __name__ == '__main__':
     mcts = MCTS(network=mu_network, action_space_size=9)
     mcts.gamma = GAMMA
     trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts, discount=GAMMA, temp_threshold=2)
-    trainer.run()
+    trainer.run(evaluator=random_evaluator, num_iterations=500, model_name='3x3-v1', checkpoint_path='D:\\Code\\Python\\mucaro\\checkpoints')
