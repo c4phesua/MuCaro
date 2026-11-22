@@ -24,6 +24,6 @@ def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, i
         'root_exploration_fraction': mcts.root_exploration_fraction
     }
 
-    win_pct_formatted = int(eval_stats['win_percentage'] * 100)
+    win_pct_formatted = round(eval_stats['win_percentage'] * 100)
     path = os.path.join(save_dir, f"{model_name}-{iteration}-{win_pct_formatted}pct.pt")
     torch.save(checkpoint, path)
