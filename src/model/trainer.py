@@ -182,6 +182,9 @@ class MuCaroTrainer:
 
     def run(
             self,
+            evaluator,
+            evaluation_steps: int = 50,
+            eval_interval: int = 10,
             num_iterations: int = 100,
             games_per_iter: int = 10,
             train_steps_per_iter: int = 20,
@@ -205,12 +208,16 @@ class MuCaroTrainer:
                 metrics = self.train_step()
                 for key in iter_metrics:
                     iter_metrics[key] += metrics[key] / train_steps_per_iter
+            iter_metrics['eval'] = None
+            if iteration % eval_interval == 0:
+                eval_result = evaluator(mcts=self.mcts, env=self.env, step_num=evaluation_steps)
+                iter_metrics['eval'] = eval_result
 
             iter_metrics["iteration"] = iteration
             iter_metrics["buffer_size"] = len(self.replay_buffer)
             history.append(iter_metrics)
 
-            print(
+            log_str = (
                 f"[Iter {iteration:03d}/{num_iterations:03d}] "
                 f"Buffer: {len(self.replay_buffer)} | "
                 f"Loss: {iter_metrics['total_loss']:.4f} "
@@ -218,5 +225,10 @@ class MuCaroTrainer:
                 f"V: {iter_metrics['value_loss']:.4f}, "
                 f"R: {iter_metrics['reward_loss']:.4f})"
             )
+            if iter_metrics['eval']:
+                e = iter_metrics['eval']
+                log_str += f" | Eval [W:{e['win']} T:{e['tie']} L:{e['lose']}] (WinRate: {e['win_percentage']:.1%})"
+
+            print(log_str)
 
         return history
