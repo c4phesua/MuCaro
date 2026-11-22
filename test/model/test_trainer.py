@@ -625,17 +625,26 @@ def test_run_loop_evaluator_handles_empty_buffer_skips(mock_save_checkpoint, tra
 def test_save_checkpoint_creates_file_and_correct_dict(mock_makedirs, mock_torch_save, trainer):
     """
     Verify that save_checkpoint correctly structures the state dictionary,
-    creates the target directory, and saves the file with the expected filename.
+    creates the target directory, and saves the file with the expected filename
+    using the updated MCTS parameter signature.
     """
     eval_stats = {'win': 10, 'tie': 2, 'lose': 8, 'win_percentage': 0.65}
     trainer.optimizer = MagicMock()
     trainer.optimizer.state_dict.return_value = "dummy_opt_state"
 
+    # Attach required attributes to DummyMCTS to prevent AttributeError in save_checkpoint
+    trainer.mcts.network = trainer.network
+    trainer.mcts.gamma = 0.99
+    trainer.mcts.pb_c_base = 19652
+    trainer.mcts.pb_c_init = 1.25
+    trainer.mcts.root_dirichlet_alpha = 0.3
+    trainer.mcts.root_exploration_fraction = 0.25
+
+    # Call save_checkpoint using the updated signature
     save_checkpoint(
-        network=trainer.network,
+        mcts=trainer.mcts,
         optimizer=trainer.optimizer,
-        action_space_size=trainer.mcts.action_space_size,
-        board_size=(3, 3),
+        board_size=(15, 15),
         eval_stats=eval_stats,
         model_name="mucaro_test",
         iteration=42,
@@ -648,11 +657,15 @@ def test_save_checkpoint_creates_file_and_correct_dict(mock_makedirs, mock_torch
     saved_dict = mock_torch_save.call_args[0][0]
     saved_path = mock_torch_save.call_args[0][1]
 
+    # Verify newly saved dictionary keys
     assert saved_dict['iteration'] == 42
     assert saved_dict['optimizer_state'] == "dummy_opt_state"
     assert saved_dict['eval_stats']['win_percentage'] == 0.65
+    assert saved_dict['gamma'] == 0.99
+    assert saved_dict['pb_c_base'] == 19652
+    assert 'h_network_state' in saved_dict
 
-    # Update expected filename to match the '65pct' formatting produced by the source code
+    # Verify filename format: 0.65 * 100 = 65 -> 65pct
     assert "mucaro_test-42-65pct.pt" in saved_path.replace("\\", "/")
 
 
@@ -678,10 +691,11 @@ def test_run_loop_triggers_save_checkpoint_after_eval(mock_save_checkpoint, trai
     )
 
     assert mock_save_checkpoint.call_count == 1
+
+    # Verify trainer.run() passes the expected arguments matching the new signature
     mock_save_checkpoint.assert_called_once_with(
-        network=trainer.network,
+        mcts=trainer.mcts,
         optimizer=trainer.optimizer,
-        action_space_size=trainer.mcts.action_space_size,
         board_size=(3, 3),
         eval_stats=mock_evaluator.return_value,
         model_name="test_model",
