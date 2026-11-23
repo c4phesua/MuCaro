@@ -3,6 +3,7 @@ import os
 import torch
 
 from mcts.tree import MCTS
+from model.network import MuCaroNetwork
 
 
 def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, iteration, save_dir):
@@ -27,3 +28,23 @@ def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, i
     win_pct_formatted = round(eval_stats['win_percentage'] * 100)
     path = os.path.join(save_dir, f"{model_name}-{iteration}-{win_pct_formatted}pct.pt")
     torch.save(checkpoint, path)
+
+
+def load_checkpoint(path: str):
+    checkpoint = torch.load(path, weights_only=False)
+    network = MuCaroNetwork()
+    mcts = MCTS(network=network, action_space_size=checkpoint["action_space_size"])
+    mcts.network.h_network.load_state_dict(checkpoint["h_network_state"])
+    mcts.network.f_network.load_state_dict(checkpoint["f_network_state"])
+    mcts.network.g_network.load_state_dict(checkpoint["g_network_state"])
+    mcts.gamma = checkpoint["gamma"]
+    mcts.pb_c_base = checkpoint["pb_c_base"]
+    mcts.pb_c_init = checkpoint["pb_c_init"]
+    mcts.root_dirichlet_alpha = checkpoint["root_dirichlet_alpha"]
+    mcts.root_exploration_fraction = checkpoint["root_exploration_fraction"]
+
+    return mcts, checkpoint["optimizer_state"], {
+        'board_size': checkpoint["board_size"],
+        'iteration': checkpoint['iteration'],
+        'eval_stats': checkpoint['eval_stats']
+    }

@@ -1,14 +1,19 @@
 import copy
-import os
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import torch.nn as nn
+from keras import Input, Model, Sequential
+from keras.src.layers import Concatenate, Dense, Embedding, Flatten, LayerNormalization
 
-from model.utils import save_checkpoint
+from mcts.tree import MCTS
+from model.network import MuCaroNetwork
+from model.utils import save_checkpoint, load_checkpoint
 
+
+# Adjust the import below to wherever `load_checkpoint` is defined
 
 def _create_dummy_mcts():
     """Creates a lightweight mock MCTS object with valid PyTorch sub-network state dicts."""
@@ -250,3 +255,200 @@ def test_save_checkpoint_does_not_mutate_mcts():
             assert actual_tensor.device == expected_tensor.device
             assert actual_tensor.dtype == expected_tensor.dtype
             assert torch.equal(actual_tensor, expected_tensor)
+
+
+def attach_test_subnets(net: MuCaroNetwork) -> MuCaroNetwork:
+    """Attaches and builds 3x3 sub-networks with deterministic layer names for Keras 3 + PyTorch."""
+    net.h_network = Sequential(
+        [
+            Input(shape=(2, 9)),
+            Flatten(name="h_flat"),
+            Dense(64, activation="silu", name="h_dense_1"),
+            Dense(32, activation="linear", name="h_dense_2"),
+            LayerNormalization(name="h_ln"),
+        ],
+        name="h_network",
+    )
+
+    f_input = Input(shape=(32,), name="f_in")
+    f_val = Dense(16, activation="silu", name="f_val_1")(f_input)
+    f_val = Dense(4, activation="silu", name="f_val_2")(f_val)
+    f_val = Dense(1, activation="tanh", name="f_val_out")(f_val)
+    f_pol = Dense(16, activation="silu", name="f_pol_1")(f_input)
+    f_pol = Dense(9, activation="linear", name="f_pol_out")(f_pol)
+    net.f_network = Model(inputs=f_input, outputs=[f_pol, f_val], name="f_network")
+
+    g_latent_in = Input(shape=(32,), name="g_lat_in")
+    g_action_in = Input(shape=(1,), dtype=torch.long, name="g_act_in")
+    g_emb = Flatten(name="g_emb_flat")(Embedding(input_dim=9, output_dim=16, name="g_emb")(g_action_in))
+    g_cat = Concatenate(name="g_cat")([g_latent_in, g_emb])
+
+    g_lat = Dense(64, activation="silu", name="g_lat_1")(g_cat)
+    g_lat = Dense(32, activation="linear", name="g_lat_2")(g_lat)
+    g_lat = LayerNormalization(name="g_ln")(g_lat)
+
+    g_rew = Dense(16, activation="silu", name="g_rew_1")(g_cat)
+    g_rew = Dense(4, activation="silu", name="g_rew_2")(g_rew)
+    g_rew = Dense(1, activation="tanh", name="g_rew_out")(g_rew)
+    net.g_network = Model(inputs=[g_latent_in, g_action_in], outputs=[g_lat, g_rew], name="g_network")
+
+    # Trigger lazy weight initialization in Keras 3
+    dummy_obs = torch.zeros((1, 2, 9))
+    dummy_action = torch.zeros((1, 1), dtype=torch.long)
+    latent = net.h_network(dummy_obs)
+    net.f_network(latent)
+    net.g_network([latent, dummy_action])
+
+    return net
+
+
+def build_test_network() -> MuCaroNetwork:
+    return attach_test_subnets(MuCaroNetwork())
+
+
+@pytest.fixture
+def patch_mucaro_network(monkeypatch):
+    """
+    Ensures MuCaroNetwork() instantiates built sub-networks inside load_checkpoint
+    without recursively calling MuCaroNetwork().
+    """
+    orig_init = MuCaroNetwork.__init__
+
+    def patched_init(self, *args, **kwargs):
+        orig_init(self, *args, **kwargs)
+        attach_test_subnets(self)
+
+    monkeypatch.setattr(MuCaroNetwork, "__init__", patched_init)
+
+
+@pytest.fixture
+def sample_checkpoint(tmp_path):
+    """Creates a serialized checkpoint file with distinct, verifiable values."""
+    source_net = build_test_network()
+
+    # Fill weights with deterministic non-random constants so mismatches are obvious
+    with torch.no_grad():
+        for i, p in enumerate(source_net.h_network.parameters()):
+            p.fill_(0.01 * (i + 1))
+        for i, p in enumerate(source_net.f_network.parameters()):
+            p.fill_(-0.02 * (i + 1))
+        for i, p in enumerate(source_net.g_network.parameters()):
+            p.fill_(0.03 * (i + 1))
+
+    all_params = (
+            list(source_net.h_network.parameters())
+            + list(source_net.f_network.parameters())
+            + list(source_net.g_network.parameters())
+    )
+    optimizer = torch.optim.AdamW(all_params, lr=2e-4)
+
+    # Run a dummy step so optimizer state_dict is populated
+    loss = sum(p.sum() for p in all_params)
+    loss.backward()
+    optimizer.step()
+
+    ckpt_path = tmp_path / "test_ckpt.pt"
+    payload = {
+        "action_space_size": 9,
+        "h_network_state": source_net.h_network.state_dict(),
+        "f_network_state": source_net.f_network.state_dict(),
+        "g_network_state": source_net.g_network.state_dict(),
+        "gamma": 0.99,
+        "pb_c_base": 19652,
+        "pb_c_init": 1.25,
+        "root_dirichlet_alpha": 0.8,
+        "root_exploration_fraction": 0.25,
+        "optimizer_state": optimizer.state_dict(),
+        "board_size": (3, 3),
+        "iteration": 200,
+        "eval_stats": {"wins": 36, "ties": 1, "losses": 13, "win_rate": 0.72},
+    }
+    torch.save(payload, ckpt_path)
+    return str(ckpt_path), source_net, payload
+
+
+def test_load_checkpoint_restores_mcts_hyperparameters(patch_mucaro_network, sample_checkpoint):
+    ckpt_path, _, expected = sample_checkpoint
+
+    mcts, _, _ = load_checkpoint(ckpt_path)
+
+    assert isinstance(mcts, MCTS)
+    assert mcts.action_space_size == expected["action_space_size"]
+    assert mcts.gamma == pytest.approx(expected["gamma"])
+    assert mcts.pb_c_base == expected["pb_c_base"]
+    assert mcts.pb_c_init == pytest.approx(expected["pb_c_init"])
+    assert mcts.root_dirichlet_alpha == pytest.approx(expected["root_dirichlet_alpha"])
+    assert mcts.root_exploration_fraction == pytest.approx(expected["root_exploration_fraction"])
+
+
+def test_load_checkpoint_restores_network_weights_and_outputs(patch_mucaro_network, sample_checkpoint):
+    ckpt_path, source_net, _ = sample_checkpoint
+
+    mcts, _, _ = load_checkpoint(ckpt_path)
+    loaded_net = mcts.network
+
+    # 1. Verify exact parameter parity across all three sub-networks
+    for subnet_name in ("h_network", "f_network", "g_network"):
+        src_state = getattr(source_net, subnet_name).state_dict()
+        dst_state = getattr(loaded_net, subnet_name).state_dict()
+
+        assert src_state.keys() == dst_state.keys()
+        for key in src_state:
+            assert torch.equal(src_state[key], dst_state[key]), f"Mismatch in {subnet_name}.{key}"
+
+    # 2. Verify forward-pass behavioral equivalence
+    obs = torch.randn((2, 2, 9))
+    action = torch.tensor([[0], [4]], dtype=torch.long)
+
+    with torch.no_grad():
+        src_latent = source_net.h_network(obs)
+        dst_latent = loaded_net.h_network(obs)
+        assert torch.allclose(src_latent, dst_latent, atol=1e-6)
+
+        src_pol, src_val = source_net.f_network(src_latent)
+        dst_pol, dst_val = loaded_net.f_network(dst_latent)
+        assert torch.allclose(src_pol, dst_pol, atol=1e-6)
+        assert torch.allclose(src_val, dst_val, atol=1e-6)
+
+        src_next_lat, src_rew = source_net.g_network([src_latent, action])
+        dst_next_lat, dst_rew = loaded_net.g_network([dst_latent, action])
+        assert torch.allclose(src_next_lat, dst_next_lat, atol=1e-6)
+        assert torch.allclose(src_rew, dst_rew, atol=1e-6)
+
+
+def test_load_checkpoint_restores_optimizer_and_metadata(patch_mucaro_network, sample_checkpoint):
+    ckpt_path, _, expected = sample_checkpoint
+
+    mcts, optimizer_state, metadata = load_checkpoint(ckpt_path)
+
+    # Verify metadata dictionary
+    assert metadata == {
+        "board_size": expected["board_size"],
+        "iteration": expected["iteration"],
+        "eval_stats": expected["eval_stats"],
+    }
+
+    # Verify optimizer_state can be cleanly loaded into a fresh optimizer
+    all_params = (
+            list(mcts.network.h_network.parameters())
+            + list(mcts.network.f_network.parameters())
+            + list(mcts.network.g_network.parameters())
+    )
+    restored_opt = torch.optim.AdamW(all_params, lr=1e-3)
+    restored_opt.load_state_dict(optimizer_state)
+
+    assert restored_opt.param_groups[0]["lr"] == pytest.approx(2e-4)
+    assert len(restored_opt.state) > 0
+
+
+def test_load_checkpoint_file_not_found():
+    with pytest.raises(FileNotFoundError):
+        load_checkpoint("non_existent_checkpoint_path.pt")
+
+
+def test_load_checkpoint_missing_required_key_raises_key_error(patch_mucaro_network, tmp_path):
+    bad_ckpt_path = tmp_path / "incomplete_ckpt.pt"
+    torch.save({"action_space_size": 9}, bad_ckpt_path)
+
+    with pytest.raises(KeyError):
+        load_checkpoint(str(bad_ckpt_path))
