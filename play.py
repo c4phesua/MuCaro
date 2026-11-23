@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 
@@ -34,7 +35,7 @@ def render_board_2d(env: Board) -> None:
     print()
 
 
-def get_human_move_2d(env: Board) -> int:
+def get_human_move_2d(env: Board) -> Optional[int]:
     size = env.size
     legal_mask = env.get_legal_mask()
     while True:
