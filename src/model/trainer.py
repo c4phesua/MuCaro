@@ -217,7 +217,8 @@ class MuCaroTrainer:
             iter_metrics['eval'] = None
             if iteration % eval_interval == 0:
                 self._set_eval_mode()
-                eval_result = evaluator(mcts=self.mcts, env=self.env, step_num=evaluation_steps)
+                eval_result = evaluator(mcts=self.mcts, env=self.env, step_num=evaluation_steps,
+                                        use_valid_mask=self.use_valid_mask)
                 iter_metrics['eval'] = eval_result
                 save_checkpoint(mcts=self.mcts, optimizer=self.optimizer, board_size=self.env.size,
                                 eval_stats=eval_result, model_name=model_name, iteration=iteration,

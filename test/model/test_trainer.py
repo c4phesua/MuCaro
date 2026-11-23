@@ -675,7 +675,8 @@ def test_run_loop_triggers_evaluator_at_correct_intervals(mock_save_checkpoint, 
     mock_evaluator.assert_called_with(
         mcts=trainer.mcts,
         env=trainer.env,
-        step_num=10
+        step_num=10,
+        use_valid_mask=True
     )
 
     assert len(history) == 4
@@ -683,6 +684,37 @@ def test_run_loop_triggers_evaluator_at_correct_intervals(mock_save_checkpoint, 
     assert history[1]['eval']['win'] == 8  # Iter 2: Eval triggered
     assert history[2]['eval'] is None
     assert history[3]['eval'] is not None  # Iter 4: Eval triggered
+
+
+@pytest.mark.parametrize("use_valid_mask", [True, False])
+@patch('model.trainer.save_checkpoint')
+def test_run_loop_forwards_use_valid_mask_to_evaluator(
+        mock_save_checkpoint, trainer, mock_evaluator, use_valid_mask
+):
+    """
+    Verify that run() propagates trainer.use_valid_mask (True or False)
+    to the evaluator function during evaluation intervals.
+    """
+    trainer.use_valid_mask = use_valid_mask
+
+    trainer.run(
+        evaluator=mock_evaluator,
+        checkpoint_path="./dummy_checkpoints",
+        model_name="dummy_model",
+        evaluation_steps=15,
+        eval_interval=1,
+        num_iterations=1,
+        games_per_iter=1,
+        train_steps_per_iter=1,
+        min_buffer_size=1
+    )
+
+    mock_evaluator.assert_called_once_with(
+        mcts=trainer.mcts,
+        env=trainer.env,
+        step_num=15,
+        use_valid_mask=use_valid_mask
+    )
 
 
 @patch('model.trainer.save_checkpoint')
@@ -849,7 +881,7 @@ def test_run_loop_sets_eval_mode_before_evaluator(mock_save_checkpoint, trainer)
     trainer.network.f_network.train.side_effect = lambda: active_modes.update({"f": "train"})
     trainer.network.g_network.train.side_effect = lambda: active_modes.update({"g": "train"})
 
-    def spy_evaluator(mcts, env, step_num):
+    def spy_evaluator(mcts, env, step_num, use_valid_mask=True):
         # Capture the exact network modes active when evaluator executes
         modes_during_eval.append(active_modes.copy())
         return {'win': 5, 'lose': 5, 'tie': 0, 'win_percentage': 0.5}

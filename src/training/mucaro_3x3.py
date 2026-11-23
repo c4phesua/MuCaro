@@ -24,7 +24,7 @@ if __name__ == '__main__':
     mcts = MCTS(network=mu_network, action_space_size=9)
     mcts.gamma = GAMMA
     mcts.root_dirichlet_alpha = 0.8
-    trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts,
+    trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts, use_valid_mask=True,
                             discount=GAMMA, temp_threshold=2, buffer_size=10000, lr=1e-3)
     trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
     for param_group in trainer.optimizer.param_groups:
