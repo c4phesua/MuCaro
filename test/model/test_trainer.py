@@ -1,10 +1,11 @@
 import math
-import pytest
+import os
 from unittest.mock import MagicMock, patch
+
 import numpy as np
+import pytest
 import torch
 import torch.nn as nn
-import os
 
 from model.trainer import MuCaroTrainer
 from model.utils import save_checkpoint
@@ -16,8 +17,9 @@ from model.utils import save_checkpoint
 
 class DummyEnv:
     """
-    Configurable dummy environment matching Board contract:
+    Configurable dummy environment matching the Board contract:
     - Returns torch.Tensor for 'next_state' (compatible with torch.stack in sample_batch).
+    - Tracks legal moves via get_legal_mask() and updates mask state on play().
     - Supports decisive wins (winner > 0), ties (winner == -1), invalid moves (ValueError),
       and unexpected runtime errors.
     """
@@ -25,21 +27,32 @@ class DummyEnv:
     def __init__(
             self,
             obs_shape=(2, 9),
+            action_space_size=9,
             max_steps=5,
             outcome_winner=1,
-            raise_unexpected_error=False
+            raise_unexpected_error=False,
+            enforce_unique_moves=False,
     ):
         self.obs_shape = obs_shape
+        self.action_space_size = action_space_size
         self.max_steps = max_steps
         self.outcome_winner = outcome_winner
         self.raise_unexpected_error = raise_unexpected_error
+        self.enforce_unique_moves = enforce_unique_moves
         self.step_count = 0
-        self.size = 15  # Added to prevent AttributeError when saving checkpoints
+        self.size = 15  # Required when saving checkpoints
         self.m = 3
+        self.legal_mask = [True] * self.action_space_size
+        self.get_legal_mask_calls = 0
 
     def reset(self):
         self.step_count = 0
+        self.legal_mask = [True] * self.action_space_size
         return {'next_state': torch.zeros(self.obs_shape, dtype=torch.float32)}
+
+    def get_legal_mask(self):
+        self.get_legal_mask_calls += 1
+        return list(self.legal_mask)
 
     def play(self, action):
         if self.raise_unexpected_error:
@@ -47,6 +60,11 @@ class DummyEnv:
 
         if action == 999:
             raise ValueError("Invalid move")
+
+        if 0 <= action < self.action_space_size:
+            if self.enforce_unique_moves and not self.legal_mask[action]:
+                raise ValueError(f"Action {action} is already occupied")
+            self.legal_mask[action] = False
 
         self.step_count += 1
         done = self.step_count >= self.max_steps
@@ -60,21 +78,30 @@ class DummyEnv:
 
 
 class DummyMCTS:
-    """Dummy MCTS returning a valid probability distribution over the action space."""
+    """Dummy MCTS returning a valid probability distribution over legal actions."""
 
     def __init__(self, action_space_size=9):
         self.action_space_size = action_space_size
         self.call_history = []
 
-    def simulate(self, current_state, num_simulations, is_training):
+    def simulate(self, current_state, num_simulations, is_training, valid_mask=None):
         self.call_history.append({
             "state_shape": tuple(current_state.shape),
             "state_dtype": current_state.dtype,
             "num_simulations": num_simulations,
             "is_training": is_training,
+            "valid_mask": list(valid_mask) if valid_mask is not None else None,
         })
-        pi = np.ones(self.action_space_size, dtype=np.float32)
-        pi /= np.sum(pi)
+        if valid_mask is not None:
+            mask_arr = np.asarray(valid_mask, dtype=bool)
+            pi = np.where(mask_arr, 1.0, 0.0).astype(np.float32)
+            total = np.sum(pi)
+            if total > 0:
+                pi /= total
+            else:
+                pi = np.ones(self.action_space_size, dtype=np.float32) / self.action_space_size
+        else:
+            pi = np.ones(self.action_space_size, dtype=np.float32) / self.action_space_size
         return pi
 
 
@@ -133,7 +160,7 @@ def trainer():
     np.random.seed(42)
     torch.manual_seed(42)
 
-    env = DummyEnv(obs_shape=(2, 9), max_steps=5, outcome_winner=1)
+    env = DummyEnv(obs_shape=(2, 9), action_space_size=9, max_steps=5, outcome_winner=1)
     mcts = DummyMCTS(action_space_size=9)
     network = DummyNetwork(action_space_size=9)
 
@@ -141,6 +168,7 @@ def trainer():
         env=env,
         mcts=mcts,
         network=network,
+        use_valid_mask=True,
         buffer_size=20,
         batch_size=4,
         unroll_steps=3,
@@ -167,6 +195,89 @@ def mock_evaluator():
 # ==============================================================================
 # 3. UNIT TESTS (PYTEST)
 # ==============================================================================
+
+# --------------------------------------------------------------------------
+# Initialization & Valid Mask Configuration Tests
+# --------------------------------------------------------------------------
+
+def test_trainer_use_valid_mask_configuration():
+    """Verify use_valid_mask defaults to True and can be explicitly disabled."""
+    env = DummyEnv()
+    mcts = DummyMCTS()
+    network = DummyNetwork()
+
+    default_trainer = MuCaroTrainer(env=env, mcts=mcts, network=network)
+    assert default_trainer.use_valid_mask is True
+
+    unmasked_trainer = MuCaroTrainer(env=env, mcts=mcts, network=network, use_valid_mask=False)
+    assert unmasked_trainer.use_valid_mask is False
+
+
+def test_self_play_passes_legal_mask_when_use_valid_mask_true(trainer):
+    """
+    Verify that when use_valid_mask=True, self_play_game() queries env.get_legal_mask()
+    and forwards the evolving legal mask to mcts.simulate() at every step.
+    """
+    trainer.use_valid_mask = True
+    trainer.self_play_game()
+
+    assert trainer.env.get_legal_mask_calls == 5
+    assert len(trainer.mcts.call_history) == 5
+
+    # First step must receive an all-True mask
+    first_mask = trainer.mcts.call_history[0]["valid_mask"]
+    assert first_mask == [True] * 9
+
+    # Each subsequent step must have one fewer legal action as moves are played
+    for step_idx, call_record in enumerate(trainer.mcts.call_history):
+        mask = call_record["valid_mask"]
+        assert mask is not None
+        assert sum(mask) == 9 - step_idx
+
+
+def test_self_play_passes_none_when_use_valid_mask_false(trainer):
+    """
+    Verify that when use_valid_mask=False, self_play_game() skips env.get_legal_mask()
+    and passes valid_mask=None to mcts.simulate() at every step.
+    """
+    trainer.use_valid_mask = False
+    trainer.self_play_game()
+
+    assert trainer.env.get_legal_mask_calls == 0
+    assert len(trainer.mcts.call_history) == 5
+    for call_record in trainer.mcts.call_history:
+        assert call_record["valid_mask"] is None
+
+
+def test_self_play_with_valid_mask_prevents_duplicate_illegal_moves():
+    """
+    Verify end-to-end masked self-play completes a full 9-move board without
+    ever re-selecting an occupied cell when enforce_unique_moves=True.
+    """
+    np.random.seed(123)
+    env = DummyEnv(
+        obs_shape=(2, 9),
+        action_space_size=9,
+        max_steps=9,
+        outcome_winner=-1,
+        enforce_unique_moves=True,
+    )
+    mcts = DummyMCTS(action_space_size=9)
+    network = DummyNetwork(action_space_size=9)
+    masked_trainer = MuCaroTrainer(
+        env=env,
+        mcts=mcts,
+        network=network,
+        use_valid_mask=True,
+        temp_threshold=5,
+    )
+
+    game_data = masked_trainer.self_play_game()
+
+    assert len(game_data["actions"]) == 9
+    assert len(set(game_data["actions"])) == 9
+    assert game_data["rewards"][-1] == 0.0  # Clean tie, no -1.0 invalid-move penalty
+
 
 # --------------------------------------------------------------------------
 # Self-Play Tests

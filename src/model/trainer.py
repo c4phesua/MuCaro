@@ -19,6 +19,7 @@ class MuCaroTrainer:
             env,
             mcts,
             network,
+            use_valid_mask: bool = True,
             buffer_size: int = 10_000,
             batch_size: int = 64,
             unroll_steps: int = 5,
@@ -31,6 +32,7 @@ class MuCaroTrainer:
         self.env: Board = env
         self.mcts: MCTS = mcts
         self.network: MuCaroNetwork = network
+        self.use_valid_mask = use_valid_mask
 
         self.replay_buffer: deque = deque(maxlen=buffer_size)
 
@@ -66,6 +68,7 @@ class MuCaroTrainer:
                 current_state=obs,
                 num_simulations=self.num_simulations,
                 is_training=True,
+                valid_mask=self.env.get_legal_mask() if self.use_valid_mask else None
             )
             if step < self.temp_threshold:
                 action = int(np.random.choice(len(pi), p=pi))
