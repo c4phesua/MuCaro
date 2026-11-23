@@ -1,14 +1,22 @@
-from src.environment.caro import Board
+import argparse
+import sys
+from pathlib import Path
+
+SRC_DIR = Path(__file__).resolve().parent / "src"
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from model.utils import load_checkpoint
 
 if __name__ == '__main__':
-    board = Board(size=10)
-    board.render_board(printable=True)
-    while True:
-        action = int(input(f'player {board.current_player + 1} play: '))
-        result = board.play(action)
-        board.render_board(printable=True)
-        if result['done']:
-            print('Game over')
-            print(f'winner = player {result["winner"] + 1}')
-            break
-
+    parser = argparse.ArgumentParser(description="Load MuCaro checkpoint.")
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        help="Checkpoint path",
+    )
+    args = parser.parse_args()
+    if args.checkpoint is None:
+        raise Exception("checkpoint path is not provided")
+    mcts, _, model_infos = load_checkpoint(args.checkpoint)
+    print(model_infos)

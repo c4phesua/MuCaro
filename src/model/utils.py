@@ -30,9 +30,8 @@ def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, i
     torch.save(checkpoint, path)
 
 
-def load_checkpoint(path: str):
+def load_checkpoint(path: str, network: MuCaroNetwork):
     checkpoint = torch.load(path, weights_only=False)
-    network = MuCaroNetwork()
     mcts = MCTS(network=network, action_space_size=checkpoint["action_space_size"])
     mcts.network.h_network.load_state_dict(checkpoint["h_network_state"])
     mcts.network.f_network.load_state_dict(checkpoint["f_network_state"])
