@@ -1,5 +1,5 @@
 import math
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -19,19 +19,23 @@ class MCTS:
         self.root_exploration_fraction: float = 0.25
         self.action_space_size = action_space_size
 
-    def simulate(self, current_state, num_simulations=40, is_training: bool = True):
+    def simulate(self, current_state, valid_mask: Optional[list]=None, num_simulations=40, is_training: bool = True):
         if num_simulations <= 0:
             raise ValueError("Number of simulation must greater than 0")
         minmax_norm = MinMaxStats(-1, 1)
         current_state = current_state.unsqueeze(0)
         with torch.no_grad():
             hidden_state, policy, _ = self.network.initial_inference(current_state)
+            if valid_mask is not None:
+                valid_mask_tensor = ~torch.tensor(valid_mask, dtype=torch.bool)
+                policy = policy.masked_fill(valid_mask_tensor.unsqueeze(0), -torch.inf)
             priors = torch.softmax(policy, dim=-1).squeeze(0).cpu().tolist()
             root = Node(action=-1, action_space_size=self.action_space_size)
             root.hidden_state = hidden_state
             root.visit_count = 1
             for action in range(self.action_space_size):
-                root.children[action] = Node(action, self.action_space_size, prior=priors[action])
+                if valid_mask is None or valid_mask[action]:
+                    root.children[action] = Node(action, self.action_space_size, prior=priors[action])
             if is_training:
                 self.add_exploration_noise(root)
             for _ in range(num_simulations):
