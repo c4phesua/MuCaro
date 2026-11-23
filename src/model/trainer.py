@@ -243,3 +243,7 @@ class MuCaroTrainer:
             print(log_str)
 
         return history
+
+    def set_lr(self, new_lr: float):
+        for param_group in self.optimizer.param_groups:
+            param_group["lr"] = new_lr

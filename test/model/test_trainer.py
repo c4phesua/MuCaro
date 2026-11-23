@@ -915,3 +915,85 @@ def test_run_loop_sets_eval_mode_before_evaluator(mock_save_checkpoint, trainer)
     )
     assert len(modes_during_eval) == 1
     assert modes_during_eval[0] == {"h": "eval", "f": "eval", "g": "eval"}
+
+
+# --------------------------------------------------------------------------
+# Learning Rate Scheduling Helper Tests
+# --------------------------------------------------------------------------
+
+def test_set_lr_updates_optimizer_learning_rate(trainer):
+    """Verify set_lr() updates the learning rate in the optimizer's param_groups."""
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(1e-2)
+
+    trainer.set_lr(5e-4)
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(5e-4)
+
+    trainer.set_lr(1e-5)
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(1e-5)
+
+
+def test_set_lr_updates_all_param_groups(trainer):
+    """Verify set_lr() updates every parameter group when multiple groups exist."""
+    trainer.optimizer = torch.optim.AdamW(
+        [
+            {"params": [trainer.network.h_param], "lr": 1e-2},
+            {"params": [trainer.network.g_param], "lr": 5e-3},
+            {"params": [trainer.network.f_param], "lr": 1e-3},
+        ]
+    )
+
+    trainer.set_lr(2.5e-4)
+
+    assert len(trainer.optimizer.param_groups) == 3
+    for group in trainer.optimizer.param_groups:
+        assert group["lr"] == pytest.approx(2.5e-4)
+
+
+def test_set_lr_preserves_optimizer_momentum_state(trainer):
+    """
+    Verify set_lr() modifies learning rates in-place without clearing
+    AdamW state buffers (step, exp_avg, exp_avg_sq) accumulated from prior steps.
+    """
+    game_data = trainer.self_play_game()
+    for _ in range(6):
+        trainer.replay_buffer.append(game_data)
+
+    # Populate AdamW state buffers with one training step
+    trainer.train_step()
+    state_before = {
+        param: {k: v.clone() for k, v in state.items()}
+        for param, state in trainer.optimizer.state.items()
+    }
+    assert len(state_before) > 0
+
+    trainer.set_lr(1e-4)
+
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(1e-4)
+    for param, expected_state in state_before.items():
+        actual_state = trainer.optimizer.state[param]
+        for buf_name, expected_tensor in expected_state.items():
+            assert torch.equal(actual_state[buf_name], expected_tensor)
+
+
+def test_set_lr_controls_parameter_update_magnitude_in_train_step(trainer):
+    """
+    Verify set_lr() directly governs weight update magnitude during train_step(),
+    including freezing weight updates when set to 0.0 despite non-zero gradients.
+    """
+    game_data = trainer.self_play_game()
+    for _ in range(6):
+        trainer.replay_buffer.append(game_data)
+
+    trainer.set_lr(0.0)
+    h_before = trainer.network.h_param.item()
+    g_before = trainer.network.g_param.item()
+    f_before = trainer.network.f_param.item()
+
+    trainer.train_step()
+
+    # Gradients are still computed, but weights remain unchanged because lr == 0.0
+    assert trainer.network.h_param.grad is not None
+    assert trainer.network.h_param.grad.item() != 0.0
+    assert trainer.network.h_param.item() == pytest.approx(h_before)
+    assert trainer.network.g_param.item() == pytest.approx(g_before)
+    assert trainer.network.f_param.item() == pytest.approx(f_before)
