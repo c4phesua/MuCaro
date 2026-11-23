@@ -5,7 +5,7 @@ from mcts.tree import MCTS
 import numpy as np
 
 
-def random_evaluator(mcts: MCTS, env: Board, step_num):
+def random_evaluator(mcts: MCTS, env: Board, step_num, use_valid_mask: bool = True):
     total_win = 0
     total_tie = 0
     total_lose = 0
@@ -17,7 +17,8 @@ def random_evaluator(mcts: MCTS, env: Board, step_num):
         invalid_move_made = False
         while not done:
             if model_play_id == env.current_player:
-                policy = mcts.simulate(current_state=current_state, is_training=False)
+                policy = mcts.simulate(current_state=current_state, is_training=False,
+                                       valid_mask=env.get_legal_mask() if use_valid_mask else None)
                 action = np.argmax(policy)
                 try:
                     state_info = env.play(action)

@@ -85,18 +85,16 @@ def main():
 
     with torch.no_grad():
         while not done:
-            valid_mask = env.get_legal_mask()
             if env.current_player == human:
                 action = get_human_move_2d(env)
             else:
+                valid_mask = env.get_legal_mask()
                 policy = mcts.simulate(
                     current_state=state,
                     num_simulations=args.simulation,
                     is_training=False,
+                    valid_mask=valid_mask
                 )
-                for i in range(len(valid_mask)):
-                    if not valid_mask[i]:
-                        policy[i] = float("-inf")
                 action = int(np.argmax(policy))
                 ai_r, ai_c = divmod(action, env.size)
                 print(f"AI plays: ({ai_r}, {ai_c})")
