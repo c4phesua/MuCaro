@@ -30,4 +30,4 @@ if __name__ == '__main__':
     for param_group in trainer.optimizer.param_groups:
         param_group["lr"] = 2e-4
     trainer.run(evaluator=random_evaluator, num_iterations=500, train_steps_per_iter=10,
-                model_name='3x3-v3', checkpoint_path='D:\\Code\\Python\\mucaro\\checkpoints')
+                model_name='3x3-v3', checkpoint_path='../../checkpoints')
