@@ -53,6 +53,7 @@ def test_save_checkpoint_structure_and_metadata(mock_makedirs, mock_torch_save):
         model_name="mucaro_v1",
         iteration=50,
         save_dir="./dummy_checkpoints",
+        win_length=3
     )
 
     mock_makedirs.assert_called_once_with("./dummy_checkpoints", exist_ok=True)
@@ -74,6 +75,7 @@ def test_save_checkpoint_structure_and_metadata(mock_makedirs, mock_torch_save):
         "pb_c_init",
         "root_dirichlet_alpha",
         "root_exploration_fraction",
+        "win_length"
     }
     assert set(saved_dict.keys()) == expected_keys
 
@@ -83,6 +85,7 @@ def test_save_checkpoint_structure_and_metadata(mock_makedirs, mock_torch_save):
     assert saved_dict["eval_stats"] == eval_stats
     assert saved_dict["action_space_size"] == 9
     assert saved_dict["board_size"] == (3, 3)
+    assert saved_dict["win_length"] == 3
     assert saved_dict["gamma"] == 0.99
     assert saved_dict["pb_c_base"] == 19652.0
     assert saved_dict["pb_c_init"] == 1.25
@@ -124,6 +127,7 @@ def test_save_checkpoint_filename_formatting(
         model_name="caro15",
         iteration=10,
         save_dir="./out",
+        win_length=3
     )
 
     _, saved_path = mock_torch_save.call_args[0]
@@ -153,6 +157,7 @@ def test_save_checkpoint_roundtrip_serialization(tmp_path):
         model_name="roundtrip_test",
         iteration=7,
         save_dir=save_dir,
+        win_length=3
     )
 
     expected_file = tmp_path / "checkpoints" / "roundtrip_test-7-80pct.pt"
@@ -231,6 +236,7 @@ def test_save_checkpoint_does_not_mutate_mcts():
             model_name="immutability_test",
             iteration=15,
             save_dir="./dummy_checkpoints",
+            win_length=3
         )
 
     # 1. Verify no attributes were added, removed, or modified on MCTS
@@ -352,6 +358,7 @@ def sample_checkpoint(tmp_path):
         "board_size": (3, 3),
         "iteration": 200,
         "eval_stats": {"win": 36, "tie": 1, "lose": 13, "win_percentage": 0.72},
+        "win_length": 3
     }
     torch.save(payload, ckpt_path)
     return str(ckpt_path), source_net, payload
@@ -423,6 +430,7 @@ def test_load_checkpoint_restores_optimizer_and_metadata(sample_checkpoint):
         "board_size": expected["board_size"],
         "iteration": expected["iteration"],
         "eval_stats": expected["eval_stats"],
+        "win_length": 3
     }
 
     all_params = (

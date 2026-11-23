@@ -6,7 +6,7 @@ from mcts.tree import MCTS
 from model.network import MuCaroNetwork
 
 
-def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, iteration, save_dir):
+def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, iteration, save_dir, win_length):
     os.makedirs(save_dir, exist_ok=True)
 
     checkpoint = {
@@ -18,6 +18,7 @@ def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, i
         'eval_stats': eval_stats,
         'action_space_size': mcts.action_space_size,
         'board_size': board_size,
+        'win_length': win_length,
         'gamma': mcts.gamma,
         'pb_c_base': mcts.pb_c_base,
         'pb_c_init': mcts.pb_c_init,
@@ -45,5 +46,6 @@ def load_checkpoint(path: str, network: MuCaroNetwork):
     return mcts, checkpoint["optimizer_state"], {
         'board_size': checkpoint["board_size"],
         'iteration': checkpoint['iteration'],
-        'eval_stats': checkpoint['eval_stats']
+        'eval_stats': checkpoint['eval_stats'],
+        'win_length': checkpoint['win_length']
     }

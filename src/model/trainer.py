@@ -218,7 +218,7 @@ class MuCaroTrainer:
                 iter_metrics['eval'] = eval_result
                 save_checkpoint(mcts=self.mcts, optimizer=self.optimizer, board_size=self.env.size,
                                 eval_stats=eval_result, model_name=model_name, iteration=iteration,
-                                save_dir=checkpoint_path)
+                                save_dir=checkpoint_path, win_length=self.env.m)
 
             iter_metrics["iteration"] = iteration
             iter_metrics["buffer_size"] = len(self.replay_buffer)

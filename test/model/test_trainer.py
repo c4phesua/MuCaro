@@ -35,6 +35,7 @@ class DummyEnv:
         self.raise_unexpected_error = raise_unexpected_error
         self.step_count = 0
         self.size = 15  # Added to prevent AttributeError when saving checkpoints
+        self.m = 3
 
     def reset(self):
         self.step_count = 0
@@ -648,7 +649,8 @@ def test_save_checkpoint_creates_file_and_correct_dict(mock_makedirs, mock_torch
         eval_stats=eval_stats,
         model_name="mucaro_test",
         iteration=42,
-        save_dir="./dummy_checkpoints"
+        save_dir="./dummy_checkpoints",
+        win_length=trainer.env.m
     )
 
     mock_makedirs.assert_called_once_with("./dummy_checkpoints", exist_ok=True)
@@ -700,7 +702,8 @@ def test_run_loop_triggers_save_checkpoint_after_eval(mock_save_checkpoint, trai
         eval_stats=mock_evaluator.return_value,
         model_name="test_model",
         iteration=2,
-        save_dir="./out_checkpoints"
+        save_dir="./out_checkpoints",
+        win_length=3
     )
 
 
