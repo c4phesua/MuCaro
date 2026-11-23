@@ -83,7 +83,7 @@ def main():
     render_board_2d(env)
     state = board_info["next_state"]
 
-    with torch.no_grad():
+    with torch.inference_mode():
         while not done:
             if env.current_player == human:
                 action = get_human_move_2d(env)
