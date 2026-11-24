@@ -13,14 +13,14 @@ from model.network import MuCaroNetwork
 from model.utils import save_checkpoint, load_checkpoint
 
 
-# Adjust the import below to wherever `load_checkpoint` is defined
-
 def _create_dummy_mcts():
     """Creates a lightweight mock MCTS object with valid PyTorch sub-network state dicts."""
     network = SimpleNamespace(
         h_network=nn.Linear(18, 32),
         f_network=nn.Linear(32, 9),
         g_network=nn.Linear(32, 32),
+        projector_network=nn.Linear(32, 32),
+        predictor_network=nn.Linear(32, 32),
     )
     return SimpleNamespace(
         network=network,
@@ -38,7 +38,7 @@ def _create_dummy_mcts():
 def test_save_checkpoint_structure_and_metadata(mock_makedirs, mock_torch_save):
     """
     Verify that save_checkpoint creates the target directory and passes a complete,
-    accurately structured state dictionary with all network states and MCTS hyperparameters.
+    accurately structured state dictionary with all 5 sub-network states and MCTS hyperparameters.
     """
     mcts = _create_dummy_mcts()
     optimizer = MagicMock()
@@ -66,6 +66,8 @@ def test_save_checkpoint_structure_and_metadata(mock_makedirs, mock_torch_save):
         "h_network_state",
         "f_network_state",
         "g_network_state",
+        "projector_network_state",
+        "predictor_network_state",
         "optimizer_state",
         "eval_stats",
         "action_space_size",
@@ -75,7 +77,7 @@ def test_save_checkpoint_structure_and_metadata(mock_makedirs, mock_torch_save):
         "pb_c_init",
         "root_dirichlet_alpha",
         "root_exploration_fraction",
-        "win_length"
+        "win_length",
     }
     assert set(saved_dict.keys()) == expected_keys
 
@@ -92,10 +94,12 @@ def test_save_checkpoint_structure_and_metadata(mock_makedirs, mock_torch_save):
     assert saved_dict["root_dirichlet_alpha"] == 0.3
     assert saved_dict["root_exploration_fraction"] == 0.25
 
-    # Verify all three sub-network state_dicts are captured
+    # Verify all five sub-network state_dicts are captured
     assert set(saved_dict["h_network_state"].keys()) == {"weight", "bias"}
     assert set(saved_dict["f_network_state"].keys()) == {"weight", "bias"}
     assert set(saved_dict["g_network_state"].keys()) == {"weight", "bias"}
+    assert set(saved_dict["projector_network_state"].keys()) == {"weight", "bias"}
+    assert set(saved_dict["predictor_network_state"].keys()) == {"weight", "bias"}
 
     assert saved_path.replace("\\", "/") == "./dummy_checkpoints/mucaro_v1-50-65pct.pt"
 
@@ -137,13 +141,23 @@ def test_save_checkpoint_filename_formatting(
 def test_save_checkpoint_roundtrip_serialization(tmp_path):
     """
     End-to-end test writing a real .pt file to a temporary directory (auto-cleaned by pytest)
-    and reloading it with torch.load to verify weight and optimizer state integrity.
+    and reloading it with torch.load to verify weight, BatchNorm buffer, and optimizer state integrity
+    across all 5 sub-networks.
     """
     mcts = _create_dummy_mcts()
+    mcts.network.projector_network = nn.Sequential(nn.Linear(32, 32), nn.BatchNorm1d(32))
+    mcts.network.predictor_network = nn.Sequential(nn.Linear(32, 16), nn.BatchNorm1d(16), nn.Linear(16, 32))
+
+    # Populate BatchNorm running stats with a forward pass
+    dummy_x = torch.randn(4, 32)
+    _ = mcts.network.predictor_network(mcts.network.projector_network(dummy_x))
+
     params = (
-            list(mcts.network.h_network.parameters())
-            + list(mcts.network.f_network.parameters())
-            + list(mcts.network.g_network.parameters())
+        list(mcts.network.h_network.parameters())
+        + list(mcts.network.f_network.parameters())
+        + list(mcts.network.g_network.parameters())
+        + list(mcts.network.projector_network.parameters())
+        + list(mcts.network.predictor_network.parameters())
     )
     optimizer = torch.optim.AdamW(params, lr=1e-3)
     eval_stats = {"win": 8, "tie": 1, "lose": 1, "win_percentage": 0.8}
@@ -175,27 +189,41 @@ def test_save_checkpoint_roundtrip_serialization(tmp_path):
     assert torch.equal(
         loaded["g_network_state"]["weight"], mcts.network.g_network.weight.cpu()
     )
+    assert torch.equal(
+        loaded["projector_network_state"]["1.running_mean"],
+        mcts.network.projector_network[1].running_mean.cpu(),
+    )
+    assert torch.equal(
+        loaded["predictor_network_state"]["1.running_var"],
+        mcts.network.predictor_network[1].running_var.cpu(),
+    )
     assert "param_groups" in loaded["optimizer_state"]
 
 
 def test_save_checkpoint_does_not_mutate_mcts():
     """
     Verify that save_checkpoint is strictly read-only and does not mutate
-    MCTS attributes, sub-network weights, tensor devices/dtypes, or training modes.
+    MCTS attributes, sub-network weights, tensor devices/dtypes, or training modes
+    across all 5 sub-networks (h, f, g, projector, predictor).
     """
-    # Build sub-networks in distinct training/eval modes to ensure modes are preserved
     h_net = nn.Sequential(nn.Linear(18, 32), nn.BatchNorm1d(32))
     f_net = nn.Linear(32, 9)
     g_net = nn.Linear(32, 32)
+    projector_net = nn.Sequential(nn.Linear(32, 32), nn.BatchNorm1d(32))
+    predictor_net = nn.Sequential(nn.Linear(32, 16), nn.BatchNorm1d(16), nn.Linear(16, 32))
 
     h_net.train()
     f_net.eval()
     g_net.train()
+    projector_net.eval()
+    predictor_net.train()
 
     network = SimpleNamespace(
         h_network=h_net,
         f_network=f_net,
         g_network=g_net,
+        projector_network=projector_net,
+        predictor_network=predictor_net,
     )
 
     mcts = SimpleNamespace(
@@ -220,11 +248,15 @@ def test_save_checkpoint_does_not_mutate_mcts():
         "h": mcts.network.h_network.training,
         "f": mcts.network.f_network.training,
         "g": mcts.network.g_network.training,
+        "projector": mcts.network.projector_network.training,
+        "predictor": mcts.network.predictor_network.training,
     }
     weights_before = {
         "h": {k: v.detach().clone() for k, v in mcts.network.h_network.state_dict().items()},
         "f": {k: v.detach().clone() for k, v in mcts.network.f_network.state_dict().items()},
         "g": {k: v.detach().clone() for k, v in mcts.network.g_network.state_dict().items()},
+        "projector": {k: v.detach().clone() for k, v in mcts.network.projector_network.state_dict().items()},
+        "predictor": {k: v.detach().clone() for k, v in mcts.network.predictor_network.state_dict().items()},
     }
 
     with patch("os.makedirs"), patch("torch.save"):
@@ -247,12 +279,16 @@ def test_save_checkpoint_does_not_mutate_mcts():
     assert mcts.network.h_network.training == modes_before["h"]
     assert mcts.network.f_network.training == modes_before["f"]
     assert mcts.network.g_network.training == modes_before["g"]
+    assert mcts.network.projector_network.training == modes_before["projector"]
+    assert mcts.network.predictor_network.training == modes_before["predictor"]
 
     # 3. Verify all parameter and buffer tensors remain identical in value, dtype, and device
     for net_key, net_module in [
         ("h", mcts.network.h_network),
         ("f", mcts.network.f_network),
         ("g", mcts.network.g_network),
+        ("projector", mcts.network.projector_network),
+        ("predictor", mcts.network.predictor_network),
     ]:
         current_state = net_module.state_dict()
         assert set(current_state.keys()) == set(weights_before[net_key].keys())

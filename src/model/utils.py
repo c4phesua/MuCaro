@@ -14,6 +14,8 @@ def save_checkpoint(mcts: MCTS, optimizer, board_size, eval_stats, model_name, i
         'h_network_state': mcts.network.h_network.state_dict(),
         'f_network_state': mcts.network.f_network.state_dict(),
         'g_network_state': mcts.network.g_network.state_dict(),
+        'projector_network_state': mcts.network.projector_network.state_dict(),
+        'predictor_network_state': mcts.network.predictor_network.state_dict(),
         'optimizer_state': optimizer.state_dict(),
         'eval_stats': eval_stats,
         'action_space_size': mcts.action_space_size,
