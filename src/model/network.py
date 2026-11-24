@@ -13,7 +13,7 @@ class MuCaroNetwork:
 
     def build_consistency_networks(self, hidden_size: int):
         self.projector_network = Sequential(name="Projector")
-        self.projector_network.add(Input(shape=(hidden_size, )))
+        self.projector_network.add(Input(shape=(hidden_size,)))
         self.projector_network.add(Dense(hidden_size, use_bias=False))
         self.projector_network.add(BatchNormalization())
         self.projector_network.add(ReLU())
@@ -23,7 +23,7 @@ class MuCaroNetwork:
 
         predictor_bottleneck = hidden_size // 4 if hidden_size > 64 else hidden_size // 2
         self.predictor_network = Sequential(name="Predictor")
-        self.predictor_network.add(Input(shape=(hidden_size, )))
+        self.predictor_network.add(Input(shape=(hidden_size,)))
         self.predictor_network.add(Dense(predictor_bottleneck, use_bias=False, activation='linear'))
         self.predictor_network.add(BatchNormalization())
         self.predictor_network.add(ReLU())
@@ -39,6 +39,15 @@ class MuCaroNetwork:
         next_hidden, reward = self.g_network([hidden_state, action], training=training)
         policy_logits, value = self.f_network(next_hidden, training=training)
         return next_hidden, reward, policy_logits, value
+
+    @torch.no_grad()
+    def consistency_project(self, observation):
+        hidden_state = self.h_network(observation, training=False)
+        return self.projector_network(hidden_state, training=False)
+
+    def consistency_predict(self, hidden_state, training: bool = True):
+        projector_state = self.projector_network(hidden_state, training=training)
+        return self.predictor_network(projector_state, training=training)
 
     def params(self):
         return (
@@ -62,7 +71,7 @@ class MuCaroNetwork:
         assert v0.shape == (2, 1), f"Value shape expected (B, 1), actual {v0.shape}"
         assert r1.shape == (2, 1), f"Reward shape expected (B, 1), actual {r1.shape}"
 
-        z0 = self.projector_network(h0, training=False)
-        pred0 = self.predictor_network(z0, training=False)
+        z0 = self.consistency_project(dummy_obs)
+        pred0 = self.consistency_predict(z0, training=False)
         assert z0.shape == h0.shape, f"Projector shape expected {h0.shape}, actual {z0.shape}"
         assert pred0.shape == h0.shape, f"Predictor shape expected {h0.shape}, actual {pred0.shape}"

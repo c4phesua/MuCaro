@@ -173,9 +173,12 @@ def test_consistency_asymmetric_gradient_flow(setup_network):
     loss.backward()
 
     assert any(p.grad is not None for p in net.g_network.parameters()), "g_network should receive gradients."
-    assert any(p.grad is not None for p in net.projector_network.parameters()), "projector_network should receive gradients."
-    assert any(p.grad is not None for p in net.predictor_network.parameters()), "predictor_network should receive gradients."
-    assert all(p.grad is None for p in net.h_network.parameters()), "h_network target branch must not receive gradients."
+    assert any(
+        p.grad is not None for p in net.projector_network.parameters()), "projector_network should receive gradients."
+    assert any(
+        p.grad is not None for p in net.predictor_network.parameters()), "predictor_network should receive gradients."
+    assert all(
+        p.grad is None for p in net.h_network.parameters()), "h_network target branch must not receive gradients."
 
 
 def test_verify_contract_success(setup_network):
@@ -215,11 +218,11 @@ def test_params_method(setup_network):
     params_list = net.params()
 
     expected_params = (
-        list(net.h_network.parameters())
-        + list(net.f_network.parameters())
-        + list(net.g_network.parameters())
-        + list(net.projector_network.parameters())
-        + list(net.predictor_network.parameters())
+            list(net.h_network.parameters())
+            + list(net.f_network.parameters())
+            + list(net.g_network.parameters())
+            + list(net.projector_network.parameters())
+            + list(net.predictor_network.parameters())
     )
 
     assert isinstance(params_list, list), "The params() method should return a list."
@@ -228,3 +231,48 @@ def test_params_method(setup_network):
 
     for actual_param, expected_param in zip(params_list, expected_params):
         assert actual_param is expected_param, "A parameter in the returned list does not match the expected parameter."
+
+
+def test_consistency_project_output_and_no_grad(setup_network):
+    """Verifies consistency_project output shape, stop-gradient behavior, and BN running stats preservation."""
+    net, obs_shape, _, hidden_size = setup_network
+    batch_size = 4
+    dummy_obs = torch.rand((batch_size, *obs_shape), requires_grad=True)
+
+    # Snapshot Keras BatchNorm moving_mean before calling consistency_project
+    bn_layer = net.projector_network.layers[1]
+    initial_moving_mean = bn_layer.moving_mean.value.clone()
+
+    z_target = net.consistency_project(dummy_obs)
+
+    assert z_target.shape == (batch_size, hidden_size)
+    assert z_target.requires_grad is False, "consistency_project must detach gradients via @torch.no_grad()."
+    assert torch.equal(bn_layer.moving_mean.value, initial_moving_mean), (
+        "consistency_project must run in inference mode (training=False) without updating BN stats."
+    )
+
+
+def test_consistency_predict_output_and_training_flag(setup_network):
+    """Verifies consistency_predict output shape, gradient retention, and training mode flag."""
+    net, _, _, hidden_size = setup_network
+    batch_size = 4
+    dummy_hidden = torch.rand((batch_size, hidden_size), requires_grad=True)
+
+    # 1. Eval mode (training=False): should preserve BN moving stats
+    bn_layer = net.predictor_network.layers[1]
+    initial_moving_mean = bn_layer.moving_mean.value.clone()
+
+    pred_eval = net.consistency_predict(dummy_hidden, training=False)
+    assert pred_eval.shape == (batch_size, hidden_size)
+    assert pred_eval.requires_grad is True
+    assert torch.equal(bn_layer.moving_mean.value, initial_moving_mean), (
+        "consistency_predict(training=False) must not update BN running statistics."
+    )
+
+    # 2. Train mode (training=True): should update BN moving stats
+    pred_train = net.consistency_predict(dummy_hidden * 5.0 + 2.0, training=True)
+    assert pred_train.shape == (batch_size, hidden_size)
+    assert pred_train.requires_grad is True
+    assert not torch.equal(bn_layer.moving_mean.value, initial_moving_mean), (
+        "consistency_predict(training=True) should update BN running statistics."
+    )
