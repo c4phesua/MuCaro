@@ -257,7 +257,7 @@ class MuCaroTrainer:
             )
             if iter_metrics['eval']:
                 e = iter_metrics['eval']
-                log_str += f" | Eval [W:{e['win']} T:{e['tie']} L:{e['lose']}] I:{e['invalid']}] (WinRate: {e['win_percentage']:.1%})"
+                log_str += f" | Eval [W:{e['win']} T:{e['tie']} L:{e['lose']} I:{e['invalid']}] (WinRate: {e['win_percentage']:.1%})"
 
             print(log_str)
 
