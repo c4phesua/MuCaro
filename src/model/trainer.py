@@ -47,11 +47,15 @@ class MuCaroTrainer:
         self.network.h_network.eval()
         self.network.f_network.eval()
         self.network.g_network.eval()
+        self.network.projector_network.eval()
+        self.network.predictor_network.eval()
 
     def _set_train_mode(self):
         self.network.h_network.train()
         self.network.f_network.train()
         self.network.g_network.train()
+        self.network.projector_network.train()
+        self.network.predictor_network.train()
 
     def self_play_game(self) -> Dict[str, list]:
         self._set_eval_mode()
@@ -171,9 +175,9 @@ class MuCaroTrainer:
             hidden_state, pred_reward, pred_policy, pred_value = self.network.recurrent_inference(
                 hidden_state, actions[:, k - 1], training=True
             )
-            with torch.no_grad():
-                h_hidden_state = self.network.h_network(obs[:, k], training=False)
-            cosine_loss = cosine_similarity(hidden_state, h_hidden_state)
+            proj_hidden_state = self.network.consistency_project(obs[:, k])
+            pred_hidden_state = self.network.consistency_predict(hidden_state, training=True)
+            cosine_loss = cosine_similarity(proj_hidden_state, pred_hidden_state, dim=-1)
             cosine_loss = (-cosine_loss + 1.0) / 2.0
             cosine_loss = cosine_loss * consistency_mask[:, k]
             consistency_loss += cosine_loss.sum()

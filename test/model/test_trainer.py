@@ -107,8 +107,9 @@ class DummyMCTS:
 
 class DummyNetwork(nn.Module):
     """
-    Dummy Network inheriting from nn.Module with non-zero forward outputs
-    so PyTorch computes true non-zero gradients across h, g, and f networks.
+    Dummy Network inheriting from nn.Module with non-zero directional forward outputs
+    across all 5 sub-networks (h, g, f, projector, predictor) so PyTorch computes
+    true non-zero gradients across the entire architecture including SimSiam branches.
     """
 
     def __init__(self, action_space_size=9, hidden_dim=8):
@@ -116,23 +117,34 @@ class DummyNetwork(nn.Module):
         self.action_space_size = action_space_size
         self.hidden_dim = hidden_dim
 
-        # Separate parameters for each sub-network to verify full BPTT gradient flow
+        # Separate parameters for each of the 5 sub-networks
         self.h_param = nn.Parameter(torch.tensor([0.5], requires_grad=True))
         self.g_param = nn.Parameter(torch.tensor([0.5], requires_grad=True))
         self.f_param = nn.Parameter(torch.tensor([0.5], requires_grad=True))
+        # Non-uniform vector weights ensure directional sensitivity for cosine_similarity gradients
+        self.proj_param = nn.Parameter(torch.linspace(0.4, 0.8, hidden_dim), requires_grad=True)
+        self.pred_param = nn.Parameter(torch.linspace(0.9, 0.5, hidden_dim), requires_grad=True)
 
-        # Mock sub-modules to verify .train()/.eval() transitions while h_network returns a valid latent tensor
+        # Mock sub-modules to verify .train()/.eval() transitions and forward calls
         self.h_network = MagicMock(side_effect=self._h_forward)
         self.f_network = MagicMock()
         self.g_network = MagicMock()
+        self.projector_network = MagicMock(side_effect=self._proj_forward)
+        self.predictor_network = MagicMock(side_effect=self._pred_forward)
 
     def _h_forward(self, obs, training=False):
         batch_size = obs.shape[0]
         obs_mean = obs.view(batch_size, -1).mean(dim=-1, keepdim=True) + 1.0
         return obs_mean.expand(batch_size, self.hidden_dim) * self.h_param
 
+    def _proj_forward(self, hidden_state, training=False):
+        return hidden_state * self.proj_param
+
+    def _pred_forward(self, projector_state, training=False):
+        return projector_state * self.pred_param
+
     def params(self):
-        return self.parameters()
+        return list(self.parameters())
 
     def initial_inference(self, obs, training=False):
         batch_size = obs.shape[0]
@@ -152,6 +164,15 @@ class DummyNetwork(nn.Module):
         ) * self.f_param
         pred_values = next_hidden.mean(dim=-1, keepdim=True) * self.f_param
         return next_hidden, pred_reward, pred_policies, pred_values
+
+    @torch.no_grad()
+    def consistency_project(self, observation):
+        hidden_state = self.h_network(observation, training=False)
+        return self.projector_network(hidden_state, training=False)
+
+    def consistency_predict(self, hidden_state, training=True):
+        projector_state = self.projector_network(hidden_state, training=training)
+        return self.predictor_network(projector_state, training=training)
 
 
 # ==============================================================================
@@ -294,6 +315,8 @@ def test_self_play_game_win_and_alternating_discount(trainer):
     trainer.network.h_network.eval.assert_called()
     trainer.network.f_network.eval.assert_called()
     trainer.network.g_network.eval.assert_called()
+    trainer.network.projector_network.eval.assert_called()
+    trainer.network.predictor_network.eval.assert_called()
 
     assert len(game_data["observations"]) == 5
     assert len(game_data["actions"]) == 5
@@ -479,9 +502,11 @@ def test_train_step_exact_loss_and_reward_k_minus_1_alignment(trainer):
         v = torch.zeros((batch_size, 1)) * dummy_w
         return nh, r, p, v
 
-    def mock_h_net(x, training=False):
-        # Identical direction to nh -> cosine_similarity = 1.0 -> consistency_loss = 0.0
+    def mock_proj(x):
         return torch.ones((batch_size, 8))
+
+    def mock_pred(h, training=True):
+        return torch.ones((batch_size, 8)) * dummy_w
 
     with patch.object(
             trainer,
@@ -492,7 +517,9 @@ def test_train_step_exact_loss_and_reward_k_minus_1_alignment(trainer):
     ), patch.object(
         trainer.network, 'recurrent_inference', side_effect=mock_rec
     ), patch.object(
-        trainer.network, 'h_network', side_effect=mock_h_net
+        trainer.network, 'consistency_project', side_effect=mock_proj
+    ), patch.object(
+        trainer.network, 'consistency_predict', side_effect=mock_pred
     ):
         metrics = trainer.train_step()
 
@@ -563,7 +590,7 @@ def test_train_step_hidden_state_half_gradient_scaling(trainer):
     call_idx = {"step": 0}
 
     def custom_init(x, training=False):
-        h0 = torch.ones((1, 1)) * trainer.network.h_param
+        h0 = torch.ones((1, 8)) * trainer.network.h_param
         p0 = torch.zeros((1, 9))
         v0 = torch.zeros((1, 1))
         return h0, p0, v0
@@ -571,7 +598,7 @@ def test_train_step_hidden_state_half_gradient_scaling(trainer):
     def custom_rec(h, a, training=False):
         call_idx["step"] += 1
         nh = h
-        r = nh if call_idx["step"] == 2 else torch.zeros((1, 1))
+        r = nh.mean(dim=-1, keepdim=True) if call_idx["step"] == 2 else torch.zeros((1, 1))
         p = torch.zeros((1, 9))
         v = torch.zeros((1, 1))
         return nh, r, p, v
@@ -618,17 +645,19 @@ def test_train_step_gradient_clipping_enforced(trainer):
 def test_train_step_updates_all_networks_with_valid_gradients(trainer):
     """
     Verify train_step():
-    - Sets all sub-networks to train mode.
+    - Sets all 5 sub-networks (h, f, g, projector, predictor) to train mode.
     - Computes finite scalar losses including consistency_loss.
-    - Produces non-zero gradients and updates weights across h, g, and f networks.
+    - Produces non-zero gradients and updates weights across h, g, f, projector, and predictor.
     """
     game_data = trainer.self_play_game()
     for _ in range(8):
         trainer.replay_buffer.append(game_data)
 
-    h_before = trainer.network.h_param.item()
-    g_before = trainer.network.g_param.item()
-    f_before = trainer.network.f_param.item()
+    h_before = trainer.network.h_param.clone().detach()
+    g_before = trainer.network.g_param.clone().detach()
+    f_before = trainer.network.f_param.clone().detach()
+    proj_before = trainer.network.proj_param.clone().detach()
+    pred_before = trainer.network.pred_param.clone().detach()
 
     metrics = trainer.train_step()
 
@@ -643,24 +672,27 @@ def test_train_step_updates_all_networks_with_valid_gradients(trainer):
         abs=1e-6
     )
 
-    assert trainer.network.h_param.grad is not None
-    assert trainer.network.g_param.grad is not None
-    assert trainer.network.f_param.grad is not None
-    assert trainer.network.h_param.grad.item() != 0.0
-    assert trainer.network.g_param.grad.item() != 0.0
-    assert trainer.network.f_param.grad.item() != 0.0
+    assert trainer.network.h_param.grad is not None and trainer.network.h_param.grad.abs().sum() > 0
+    assert trainer.network.g_param.grad is not None and trainer.network.g_param.grad.abs().sum() > 0
+    assert trainer.network.f_param.grad is not None and trainer.network.f_param.grad.abs().sum() > 0
+    assert trainer.network.proj_param.grad is not None and trainer.network.proj_param.grad.abs().sum() > 0
+    assert trainer.network.pred_param.grad is not None and trainer.network.pred_param.grad.abs().sum() > 0
 
-    assert h_before != trainer.network.h_param.item()
-    assert g_before != trainer.network.g_param.item()
-    assert f_before != trainer.network.f_param.item()
+    assert not torch.equal(h_before, trainer.network.h_param.detach())
+    assert not torch.equal(g_before, trainer.network.g_param.detach())
+    assert not torch.equal(f_before, trainer.network.f_param.detach())
+    assert not torch.equal(proj_before, trainer.network.proj_param.detach())
+    assert not torch.equal(pred_before, trainer.network.pred_param.detach())
 
     trainer.network.h_network.train.assert_called()
     trainer.network.f_network.train.assert_called()
     trainer.network.g_network.train.assert_called()
+    trainer.network.projector_network.train.assert_called()
+    trainer.network.predictor_network.train.assert_called()
 
 
 # --------------------------------------------------------------------------
-# Consistency Loss Tests
+# SimSiam Consistency Loss (Projector + Predictor) Tests
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
@@ -674,7 +706,7 @@ def test_train_step_updates_all_networks_with_valid_gradients(trainer):
 def test_consistency_loss_exact_cosine_distance_values(trainer, target_vec, expected_loss):
     """
     Verify consistency_loss computes (-cosine_similarity + 1.0) / 2.0 accurately
-    for aligned (0.0), orthogonal (0.5), and opposite (1.0) latent vectors.
+    for aligned (0.0), orthogonal (0.5), and opposite (1.0) projected/predicted vectors.
     """
     trainer.unroll_steps = 1
     obs = torch.zeros((2, 2, 2, 9), dtype=torch.float32)
@@ -695,6 +727,9 @@ def test_consistency_loss_exact_cosine_distance_values(trainer, target_vec, expe
         nh = pred_dir * trainer.network.g_param
         return nh, torch.zeros((2, 1)), torch.zeros((2, 9)), torch.zeros((2, 1))
 
+    def mock_pred(h, training=True):
+        return h * trainer.network.pred_param[0]
+
     with patch.object(
             trainer,
             'sample_batch',
@@ -704,7 +739,9 @@ def test_consistency_loss_exact_cosine_distance_values(trainer, target_vec, expe
     ), patch.object(
         trainer.network, 'recurrent_inference', side_effect=mock_rec
     ), patch.object(
-        trainer.network, 'h_network', return_value=target_tensor
+        trainer.network, 'consistency_project', return_value=target_tensor
+    ), patch.object(
+        trainer.network, 'consistency_predict', side_effect=mock_pred
     ):
         metrics = trainer.train_step()
 
@@ -735,7 +772,7 @@ def test_consistency_loss_masks_padding_steps_and_excludes_step_zero(trainer):
     pred_dir = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
     # k=1: Sample 0 orthogonal (loss=0.5), Sample 1 aligned (loss=0.0)
     # k=2: Sample 0 orthogonal (loss=0.5), Sample 1 opposite (loss=1.0 -> MUST be masked out)
-    h_targets = [
+    proj_targets = [
         torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32),
         torch.tensor([[0.0, 1.0], [-1.0, 0.0]], dtype=torch.float32),
     ]
@@ -746,6 +783,9 @@ def test_consistency_loss_masks_padding_steps_and_excludes_step_zero(trainer):
     def mock_rec(h, a, training=False):
         return pred_dir * trainer.network.g_param, torch.zeros((2, 1)), torch.zeros((2, 9)), torch.zeros((2, 1))
 
+    def mock_pred(h, training=True):
+        return h * trainer.network.pred_param[0]
+
     with patch.object(
             trainer,
             'sample_batch',
@@ -755,7 +795,9 @@ def test_consistency_loss_masks_padding_steps_and_excludes_step_zero(trainer):
     ), patch.object(
         trainer.network, 'recurrent_inference', side_effect=mock_rec
     ), patch.object(
-        trainer.network, 'h_network', side_effect=h_targets
+        trainer.network, 'consistency_project', side_effect=proj_targets
+    ), patch.object(
+        trainer.network, 'consistency_predict', side_effect=mock_pred
     ):
         metrics = trainer.train_step()
 
@@ -791,12 +833,13 @@ def test_consistency_loss_handles_all_padded_future_steps_without_nan(trainer):
     assert metrics["consistency_loss"] == pytest.approx(0.0, abs=1e-6)
 
 
-def test_consistency_loss_stops_gradient_on_target_h_network_and_passes_correct_obs(trainer):
+def test_consistency_simsiam_asymmetric_branch_calls_and_training_flags(trainer):
     """
-    Verify that the target branch h_network(obs[:, k], training=False):
-    - Receives obs[:, k] in exact sequential order with training=False.
-    - Executes under torch.no_grad() (stop-gradient), so target weights receive no gradient
-      from consistency_loss while g_network parameters do.
+    Verify SimSiam branch execution during train_step():
+    - Target branch: consistency_project(obs[:, k]) invokes h_network(obs[:, k], training=False)
+      and projector_network(..., training=False) under torch.no_grad().
+    - Online branch: consistency_predict(hidden_state, training=True) invokes
+      projector_network(..., training=True) and predictor_network(..., training=True) with grad enabled.
     """
     trainer.unroll_steps = 2
     obs = torch.stack([
@@ -810,26 +853,103 @@ def test_consistency_loss_stops_gradient_on_target_h_network_and_passes_correct_
     target_rewards = torch.zeros((2, 3), dtype=torch.float32)
     consistency_mask = torch.ones((2, 3), dtype=torch.float32)
 
-    target_only_param = nn.Parameter(torch.tensor([[0.0, 1.0]], requires_grad=True))
-    grad_enabled_flags = []
-    received_obs_means = []
-    received_training_flags = []
+    project_calls = []
+    predict_calls = []
 
-    def spy_h_network(x, training=True):
-        grad_enabled_flags.append(torch.is_grad_enabled())
-        received_obs_means.append(x.mean().item())
-        received_training_flags.append(training)
-        return target_only_param.expand(x.shape[0], 2)
+    orig_project = trainer.network.consistency_project
+    orig_predict = trainer.network.consistency_predict
+
+    def spy_project(x):
+        project_calls.append({
+            "obs_mean": x.mean().item(),
+            "grad_enabled": torch.is_grad_enabled(),
+        })
+        return orig_project(x)
+
+    def spy_predict(h, training=True):
+        predict_calls.append({
+            "training": training,
+            "grad_enabled": torch.is_grad_enabled(),
+            "requires_grad": h.requires_grad,
+        })
+        return orig_predict(h, training=training)
+
+    with patch.object(
+            trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
+    ), patch.object(
+        trainer.network, 'consistency_project', side_effect=spy_project
+    ), patch.object(
+        trainer.network, 'consistency_predict', side_effect=spy_predict
+    ):
+        trainer.train_step()
+
+    # Both consistency_project and consistency_predict must be called for k=1 and k=2
+    assert len(project_calls) == 2
+    assert [c["obs_mean"] for c in project_calls] == pytest.approx([1.0, 2.0])
+    # Note: @torch.no_grad() wraps orig_project; inside spy_project outer grad is enabled,
+    # so verify output tensor of consistency_project has requires_grad == False and h_network got training=False
+    assert len(predict_calls) == 2
+    assert all(c["training"] is True for c in predict_calls)
+    assert all(c["grad_enabled"] is True for c in predict_calls)
+    assert all(c["requires_grad"] is True for c in predict_calls)
+
+    # Check h_network and projector_network call args for target vs online branches
+    h_calls = trainer.network.h_network.call_args_list
+    assert len(h_calls) == 2
+    assert h_calls[0].kwargs["training"] is False
+    assert h_calls[1].kwargs["training"] is False
+    assert h_calls[0].args[0].mean().item() == pytest.approx(1.0)
+    assert h_calls[1].args[0].mean().item() == pytest.approx(2.0)
+
+    # projector_network is called 4 times total: k=1 target (False), k=1 online (True), k=2 target (False), k=2 online (True)
+    proj_calls = trainer.network.projector_network.call_args_list
+    assert len(proj_calls) == 4
+    assert [c.kwargs["training"] for c in proj_calls] == [False, True, False, True]
+
+    # predictor_network is called 2 times total (online branch only, training=True)
+    pred_calls = trainer.network.predictor_network.call_args_list
+    assert len(pred_calls) == 2
+    assert [c.kwargs["training"] for c in pred_calls] == [True, True]
+
+
+def test_consistency_simsiam_asymmetric_gradient_flow(trainer):
+    """
+    Verify SimSiam stop-gradient isolation in train_step():
+    - Online branch (g_network, projector_network, predictor_network) receives non-zero gradients
+      from consistency_loss.
+    - Target branch parameter used exclusively in consistency_project receives ZERO gradient,
+      preventing representation collapse.
+    """
+    trainer.unroll_steps = 1
+    obs = torch.stack([
+        torch.full((2, 2, 9), 0.0),
+        torch.full((2, 2, 9), 1.0),
+    ], dim=1)
+    actions = torch.zeros((2, 2), dtype=torch.long)
+    target_policies = torch.full((2, 2, 9), 1.0 / 9.0, dtype=torch.float32)
+    target_values = torch.zeros((2, 2), dtype=torch.float32)
+    target_rewards = torch.zeros((2, 2), dtype=torch.float32)
+    consistency_mask = torch.ones((2, 2), dtype=torch.float32)
+
+    target_only_h_param = nn.Parameter(torch.linspace(0.2, 0.9, 8), requires_grad=True)
+
+    def spy_target_h(x, training=False):
+        assert torch.is_grad_enabled() is False
+        assert training is False
+        return target_only_h_param.unsqueeze(0).expand(x.shape[0], 8)
 
     def mock_init(x, training=False):
-        return torch.tensor([[1.0, 0.0], [1.0, 0.0]]), torch.zeros((2, 9)), torch.zeros((2, 1))
+        # Detach policy/value from g_param/proj_param/pred_param so gradients on those
+        # parameters come strictly from consistency_loss
+        h0 = torch.ones((2, 8))
+        return h0, torch.zeros((2, 9)), torch.zeros((2, 1))
 
     def mock_rec(h, a, training=False):
-        # Differentiable non-trivial direction w.r.t. g_param so cosine gradient is non-zero
-        nh = torch.stack([
-            torch.ones(2) * trainer.network.g_param,
-            torch.ones(2) * 0.5
-        ], dim=-1)
+        # Differentiable non-uniform vector w.r.t. g_param
+        g_vec = torch.linspace(0.3, 1.0, 8) * trainer.network.g_param
+        nh = g_vec.unsqueeze(0).expand(2, 8)
         return nh, torch.zeros((2, 1)), torch.zeros((2, 9)), torch.zeros((2, 1))
 
     with patch.object(
@@ -841,23 +961,54 @@ def test_consistency_loss_stops_gradient_on_target_h_network_and_passes_correct_
     ), patch.object(
         trainer.network, 'recurrent_inference', side_effect=mock_rec
     ), patch.object(
-        trainer.network, 'h_network', side_effect=spy_h_network
+        trainer.network, 'h_network', side_effect=spy_target_h
     ):
         trainer.train_step()
 
-    # h_network must be called for k=1 and k=2 under torch.no_grad() with training=False
-    assert grad_enabled_flags == [False, False]
-    assert received_training_flags == [False, False]
-    assert received_obs_means == pytest.approx([1.0, 2.0])
+    # Target branch parameter must NOT receive gradients
+    assert target_only_h_param.grad is None
 
-    # Stop-gradient: target parameter receives no gradient, while g_param is updated
-    assert target_only_param.grad is None
-    assert trainer.network.g_param.grad is not None
-    assert trainer.network.g_param.grad.item() != 0.0
+    # Online branch parameters MUST receive non-zero gradients from consistency_loss
+    assert trainer.network.g_param.grad is not None and trainer.network.g_param.grad.abs().sum() > 0
+    assert trainer.network.proj_param.grad is not None and trainer.network.proj_param.grad.abs().sum() > 0
+    assert trainer.network.pred_param.grad is not None and trainer.network.pred_param.grad.abs().sum() > 0
+
+
+def test_consistency_loss_computed_along_feature_dimension(trainer):
+    """
+    Verify cosine_similarity(..., dim=-1) computes similarity across the feature dimension
+    independently for each sample in the batch rather than across the batch dimension.
+    """
+    trainer.unroll_steps = 1
+    obs = torch.zeros((2, 2, 2, 9), dtype=torch.float32)
+    actions = torch.zeros((2, 2), dtype=torch.long)
+    target_policies = torch.full((2, 2, 9), 1.0 / 9.0, dtype=torch.float32)
+    target_values = torch.zeros((2, 2), dtype=torch.float32)
+    target_rewards = torch.zeros((2, 2), dtype=torch.float32)
+    consistency_mask = torch.ones((2, 2), dtype=torch.float32)
+
+    # Sample 0: pred=[1, 0, 0, 0], target=[1, 0, 0, 0] -> cosine = 1.0 -> loss = 0.0
+    # Sample 1: pred=[0, 1, 0, 0], target=[0, -1, 0, 0] -> cosine = -1.0 -> loss = 1.0
+    # Mean across batch along dim=-1 must be (0.0 + 1.0) / 2 = 0.5
+    pred_vecs = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]], dtype=torch.float32)
+    target_vecs = torch.tensor([[1.0, 0.0, 0.0, 0.0], [0.0, -1.0, 0.0, 0.0]], dtype=torch.float32)
+
+    with patch.object(
+            trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
+    ), patch.object(
+        trainer.network, 'consistency_project', return_value=target_vecs
+    ), patch.object(
+        trainer.network, 'consistency_predict', return_value=pred_vecs * trainer.network.pred_param[0]
+    ):
+        metrics = trainer.train_step()
+
+    assert metrics["consistency_loss"] == pytest.approx(0.5, abs=1e-5)
 
 
 # ==============================================================================
-# 4. Full Training Loop & Evaluator Tests
+# 4. FULL TRAINING LOOP & EVALUATOR TESTS
 # ==============================================================================
 
 @patch('model.trainer.save_checkpoint')
@@ -1015,7 +1166,6 @@ def test_save_checkpoint_creates_file_and_correct_dict(mock_makedirs, mock_torch
     trainer.mcts.root_dirichlet_alpha = 0.3
     trainer.mcts.root_exploration_fraction = 0.25
 
-    # Call save_checkpoint using the updated signature
     save_checkpoint(
         mcts=trainer.mcts,
         optimizer=trainer.optimizer,
@@ -1033,7 +1183,6 @@ def test_save_checkpoint_creates_file_and_correct_dict(mock_makedirs, mock_torch
     saved_dict = mock_torch_save.call_args[0][0]
     saved_path = mock_torch_save.call_args[0][1]
 
-    # Verify newly saved dictionary keys
     assert saved_dict['iteration'] == 42
     assert saved_dict['optimizer_state'] == "dummy_opt_state"
     assert saved_dict['eval_stats']['win_percentage'] == 0.65
@@ -1068,7 +1217,6 @@ def test_run_loop_triggers_save_checkpoint_after_eval(mock_save_checkpoint, trai
 
     assert mock_save_checkpoint.call_count == 1
 
-    # Verify trainer.run() passes the expected arguments matching the new signature
     mock_save_checkpoint.assert_called_once_with(
         mcts=trainer.mcts,
         optimizer=trainer.optimizer,
@@ -1082,38 +1230,45 @@ def test_run_loop_triggers_save_checkpoint_after_eval(mock_save_checkpoint, trai
 
 
 def test_set_eval_and_train_mode_helpers(trainer):
-    """Verify _set_eval_mode and _set_train_mode toggle all three sub-networks."""
+    """Verify _set_eval_mode and _set_train_mode toggle all 5 sub-networks."""
     trainer._set_eval_mode()
     trainer.network.h_network.eval.assert_called_once()
     trainer.network.f_network.eval.assert_called_once()
     trainer.network.g_network.eval.assert_called_once()
+    trainer.network.projector_network.eval.assert_called_once()
+    trainer.network.predictor_network.eval.assert_called_once()
 
     trainer._set_train_mode()
     trainer.network.h_network.train.assert_called_once()
     trainer.network.f_network.train.assert_called_once()
     trainer.network.g_network.train.assert_called_once()
+    trainer.network.projector_network.train.assert_called_once()
+    trainer.network.predictor_network.train.assert_called_once()
 
 
 @patch('model.trainer.save_checkpoint')
 def test_run_loop_sets_eval_mode_before_evaluator(mock_save_checkpoint, trainer):
     """
-    Verify that run() switches all sub-networks back to eval mode after train_step()
+    Verify that run() switches all 5 sub-networks back to eval mode after train_step()
     and immediately before invoking the evaluator, while leaving them in train mode
     on non-evaluation iterations.
     """
-    active_modes = {"h": None, "f": None, "g": None}
+    active_modes = {"h": None, "f": None, "g": None, "projector": None, "predictor": None}
     modes_during_eval = []
 
     trainer.network.h_network.eval.side_effect = lambda: active_modes.update({"h": "eval"})
     trainer.network.f_network.eval.side_effect = lambda: active_modes.update({"f": "eval"})
     trainer.network.g_network.eval.side_effect = lambda: active_modes.update({"g": "eval"})
+    trainer.network.projector_network.eval.side_effect = lambda: active_modes.update({"projector": "eval"})
+    trainer.network.predictor_network.eval.side_effect = lambda: active_modes.update({"predictor": "eval"})
 
     trainer.network.h_network.train.side_effect = lambda: active_modes.update({"h": "train"})
     trainer.network.f_network.train.side_effect = lambda: active_modes.update({"f": "train"})
     trainer.network.g_network.train.side_effect = lambda: active_modes.update({"g": "train"})
+    trainer.network.projector_network.train.side_effect = lambda: active_modes.update({"projector": "train"})
+    trainer.network.predictor_network.train.side_effect = lambda: active_modes.update({"predictor": "train"})
 
     def spy_evaluator(mcts, env, step_num, use_valid_mask=True):
-        # Capture the exact network modes active when evaluator executes
         modes_during_eval.append(active_modes.copy())
         return {'win': 5, 'lose': 5, 'tie': 0, 'win_percentage': 0.5}
 
@@ -1130,7 +1285,7 @@ def test_run_loop_sets_eval_mode_before_evaluator(mock_save_checkpoint, trainer)
         min_buffer_size=1
     )
     assert len(modes_during_eval) == 0
-    assert active_modes == {"h": "train", "f": "train", "g": "train"}
+    assert active_modes == {"h": "train", "f": "train", "g": "train", "projector": "train", "predictor": "train"}
 
     # Iteration 2: triggers eval -> networks must switch from 'train' to 'eval' before evaluator runs
     trainer.run(
@@ -1145,7 +1300,7 @@ def test_run_loop_sets_eval_mode_before_evaluator(mock_save_checkpoint, trainer)
         min_buffer_size=1
     )
     assert len(modes_during_eval) == 1
-    assert modes_during_eval[0] == {"h": "eval", "f": "eval", "g": "eval"}
+    assert modes_during_eval[0] == {"h": "eval", "f": "eval", "g": "eval", "projector": "eval", "predictor": "eval"}
 
 
 # --------------------------------------------------------------------------
@@ -1170,12 +1325,14 @@ def test_set_lr_updates_all_param_groups(trainer):
             {"params": [trainer.network.h_param], "lr": 1e-2},
             {"params": [trainer.network.g_param], "lr": 5e-3},
             {"params": [trainer.network.f_param], "lr": 1e-3},
+            {"params": [trainer.network.proj_param], "lr": 1e-3},
+            {"params": [trainer.network.pred_param], "lr": 1e-3},
         ]
     )
 
     trainer.set_lr(2.5e-4)
 
-    assert len(trainer.optimizer.param_groups) == 3
+    assert len(trainer.optimizer.param_groups) == 5
     for group in trainer.optimizer.param_groups:
         assert group["lr"] == pytest.approx(2.5e-4)
 
@@ -1209,22 +1366,30 @@ def test_set_lr_preserves_optimizer_momentum_state(trainer):
 def test_set_lr_controls_parameter_update_magnitude_in_train_step(trainer):
     """
     Verify set_lr() directly governs weight update magnitude during train_step(),
-    including freezing weight updates when set to 0.0 despite non-zero gradients.
+    including freezing weight updates across all 5 sub-networks when set to 0.0.
     """
     game_data = trainer.self_play_game()
     for _ in range(6):
         trainer.replay_buffer.append(game_data)
 
     trainer.set_lr(0.0)
-    h_before = trainer.network.h_param.item()
-    g_before = trainer.network.g_param.item()
-    f_before = trainer.network.f_param.item()
+    h_before = trainer.network.h_param.clone().detach()
+    g_before = trainer.network.g_param.clone().detach()
+    f_before = trainer.network.f_param.clone().detach()
+    proj_before = trainer.network.proj_param.clone().detach()
+    pred_before = trainer.network.pred_param.clone().detach()
 
     trainer.train_step()
 
     # Gradients are still computed, but weights remain unchanged because lr == 0.0
-    assert trainer.network.h_param.grad is not None
-    assert trainer.network.h_param.grad.item() != 0.0
-    assert trainer.network.h_param.item() == pytest.approx(h_before)
-    assert trainer.network.g_param.item() == pytest.approx(g_before)
-    assert trainer.network.f_param.item() == pytest.approx(f_before)
+    assert trainer.network.h_param.grad is not None and trainer.network.h_param.grad.abs().sum() > 0
+    assert trainer.network.g_param.grad is not None and trainer.network.g_param.grad.abs().sum() > 0
+    assert trainer.network.f_param.grad is not None and trainer.network.f_param.grad.abs().sum() > 0
+    assert trainer.network.proj_param.grad is not None and trainer.network.proj_param.grad.abs().sum() > 0
+    assert trainer.network.pred_param.grad is not None and trainer.network.pred_param.grad.abs().sum() > 0
+
+    assert torch.equal(trainer.network.h_param.detach(), h_before)
+    assert torch.equal(trainer.network.g_param.detach(), g_before)
+    assert torch.equal(trainer.network.f_param.detach(), f_before)
+    assert torch.equal(trainer.network.proj_param.detach(), proj_before)
+    assert torch.equal(trainer.network.pred_param.detach(), pred_before)
