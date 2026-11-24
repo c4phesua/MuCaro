@@ -1,3 +1,6 @@
+import os
+os.environ['KERAS_BACKEND'] = 'torch'
+
 import pytest
 from unittest.mock import MagicMock, patch
 import numpy as np

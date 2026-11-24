@@ -38,4 +38,5 @@ def get_mucaro_3x3_network():
     g_reward_layers = Dense(4, activation='silu')(g_reward_layers)
     g_reward_layers = Dense(1, activation='tanh')(g_reward_layers)
     mu_network.g_network = Model(inputs=[g_latent_input, g_action_input], outputs=[g_latent_layers, g_reward_layers])
+    mu_network.build_consistency_networks(32)
     return mu_network

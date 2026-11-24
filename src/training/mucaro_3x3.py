@@ -16,7 +16,7 @@ if __name__ == '__main__':
     mu_network.f_network.summary()
     mu_network.g_network.summary()
     mu_network.verify_contract((2, 9), 9)
-    checkpoint = torch.load('../../checkpoints/3x3-v4-430-88pct.pt')
+    checkpoint = torch.load('../../checkpoints/3x3-v4-130-76pct.pt')
     mu_network.h_network.load_state_dict(checkpoint["h_network_state"])
     mu_network.f_network.load_state_dict(checkpoint["f_network_state"])
     mu_network.g_network.load_state_dict(checkpoint["g_network_state"])
@@ -30,4 +30,4 @@ if __name__ == '__main__':
     trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
     trainer.set_lr(2e-4)
     trainer.run(evaluator=random_evaluator, num_iterations=500, train_steps_per_iter=10,
-                model_name='3x3-v4', checkpoint_path='../../checkpoints')
+                model_name='3x3-v5', checkpoint_path='../../checkpoints')
