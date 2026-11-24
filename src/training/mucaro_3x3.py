@@ -16,10 +16,11 @@ if __name__ == '__main__':
     mu_network.f_network.summary()
     mu_network.g_network.summary()
     mu_network.verify_contract((2, 9), 9)
-    checkpoint = torch.load('../../checkpoints/3x3-v3-90-76pct.pt')
+    checkpoint = torch.load('../../checkpoints/3x3-v4-430-88pct.pt')
     mu_network.h_network.load_state_dict(checkpoint["h_network_state"])
     mu_network.f_network.load_state_dict(checkpoint["f_network_state"])
     mu_network.g_network.load_state_dict(checkpoint["g_network_state"])
+    print(checkpoint['eval_stats'])
     env = Board()
     mcts = MCTS(network=mu_network, action_space_size=9)
     mcts.gamma = GAMMA
@@ -27,5 +28,6 @@ if __name__ == '__main__':
     trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts, use_valid_mask=True, unroll_steps=5,
                             discount=GAMMA, temp_threshold=2, buffer_size=10000, lr=1e-3)
     trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
+    trainer.set_lr(2e-4)
     trainer.run(evaluator=random_evaluator, num_iterations=500, train_steps_per_iter=10,
                 model_name='3x3-v4', checkpoint_path='../../checkpoints')

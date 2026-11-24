@@ -121,18 +121,22 @@ class DummyNetwork(nn.Module):
         self.g_param = nn.Parameter(torch.tensor([0.5], requires_grad=True))
         self.f_param = nn.Parameter(torch.tensor([0.5], requires_grad=True))
 
-        # Mock sub-modules to verify .train() and .eval() mode transitions
-        self.h_network = MagicMock()
+        # Mock sub-modules to verify .train()/.eval() transitions while h_network returns a valid latent tensor
+        self.h_network = MagicMock(side_effect=self._h_forward)
         self.f_network = MagicMock()
         self.g_network = MagicMock()
+
+    def _h_forward(self, obs, training=False):
+        batch_size = obs.shape[0]
+        obs_mean = obs.view(batch_size, -1).mean(dim=-1, keepdim=True) + 1.0
+        return obs_mean.expand(batch_size, self.hidden_dim) * self.h_param
 
     def params(self):
         return self.parameters()
 
     def initial_inference(self, obs, training=False):
         batch_size = obs.shape[0]
-        obs_mean = obs.view(batch_size, -1).mean(dim=-1, keepdim=True) + 1.0
-        hidden_state = obs_mean.expand(batch_size, self.hidden_dim) * self.h_param
+        hidden_state = self._h_forward(obs, training=training)
         pred_policies = hidden_state.mean(dim=-1, keepdim=True).expand(
             batch_size, self.action_space_size
         ) * self.f_param
@@ -382,12 +386,12 @@ def test_replay_buffer_maxlen_eviction(trainer):
 
 def test_sample_batch_shapes_dtypes_and_absorbing_padding(trainer):
     """
-    Verify batch shapes, dtypes, and absorbing state zero-padding
-    when sampled trajectories exceed the end of a game.
+    Verify batch shapes, dtypes, observation sequence alignment, and absorbing state
+    zero-padding (including consistency_mask) when trajectories exceed game length.
     """
     obs_shape = (2, 9)
-    obs0 = torch.zeros(obs_shape, dtype=torch.float32)
-    obs1 = torch.ones(obs_shape, dtype=torch.float32)
+    obs0 = torch.full(obs_shape, 2.0, dtype=torch.float32)
+    obs1 = torch.full(obs_shape, 5.0, dtype=torch.float32)
     pi0 = np.array([1.0] + [0.0] * 8, dtype=np.float32)
     pi1 = np.array([0.0, 1.0] + [0.0] * 7, dtype=np.float32)
 
@@ -402,19 +406,29 @@ def test_sample_batch_shapes_dtypes_and_absorbing_padding(trainer):
         trainer.replay_buffer.append(short_game)
 
     with patch('random.randint', return_value=0):
-        obs_b, act_b, pol_b, val_b, rew_b = trainer.sample_batch()
+        obs_b, act_b, pol_b, val_b, rew_b, mask_b = trainer.sample_batch()
 
-    assert obs_b.shape == (4, *obs_shape)
+    assert obs_b.shape == (4, 4, *obs_shape)
     assert act_b.shape == (4, 4)
     assert pol_b.shape == (4, 4, 9)
     assert val_b.shape == (4, 4)
     assert rew_b.shape == (4, 4)
+    assert mask_b.shape == (4, 4)
 
     assert obs_b.dtype == torch.float32
     assert act_b.dtype == torch.long
     assert pol_b.dtype == torch.float32
     assert val_b.dtype == torch.float32
     assert rew_b.dtype == torch.float32
+    assert mask_b.dtype == torch.float32
+
+    # First 2 steps are valid (mask=1.0), last 2 steps are absorbing padding (mask=0.0, obs=0)
+    expected_mask = torch.tensor([[1.0, 1.0, 0.0, 0.0]] * 4, dtype=torch.float32)
+    assert torch.equal(mask_b, expected_mask)
+    assert torch.equal(obs_b[0, 0], obs0)
+    assert torch.equal(obs_b[0, 1], obs1)
+    assert torch.equal(obs_b[0, 2], torch.zeros(obs_shape, dtype=torch.float32))
+    assert torch.equal(obs_b[0, 3], torch.zeros(obs_shape, dtype=torch.float32))
 
 
 # --------------------------------------------------------------------------
@@ -423,14 +437,14 @@ def test_sample_batch_shapes_dtypes_and_absorbing_padding(trainer):
 
 def test_train_step_exact_loss_and_reward_k_minus_1_alignment(trainer):
     """
-    Verify exact analytical loss values scaled by 1 / (unroll_steps + 1),
-    specifically ensuring reward at unroll step k aligns with target_rewards[:, k - 1].
+    Verify exact analytical loss values for policy, value, reward, and consistency losses,
+    ensuring reward at unroll step k aligns with target_rewards[:, k - 1].
     """
     trainer.unroll_steps = 2
     batch_size = 2
     num_actions = 3
 
-    obs = torch.zeros((batch_size, 2, 9), dtype=torch.float32)
+    obs = torch.zeros((batch_size, 3, 2, 9), dtype=torch.float32)
     actions = torch.tensor([[0, 1, 2], [1, 2, 0]], dtype=torch.long)
 
     target_policies = torch.tensor([
@@ -448,51 +462,64 @@ def test_train_step_exact_loss_and_reward_k_minus_1_alignment(trainer):
         [1.0, 0.5, 999.0],
     ], dtype=torch.float32)
 
+    consistency_mask = torch.ones((batch_size, 3), dtype=torch.float32)
+
     dummy_w = trainer.network.h_param
 
     def mock_init(x, training=False):
-        h = torch.zeros((batch_size, 8)) * dummy_w
+        h = torch.ones((batch_size, 8)) * dummy_w
         p = torch.zeros((batch_size, num_actions)) * dummy_w
         v = torch.zeros((batch_size, 1)) * dummy_w
         return h, p, v
 
     def mock_rec(h, a, training=False):
-        nh = h * dummy_w
+        nh = torch.ones((batch_size, 8)) * dummy_w
         r = torch.zeros((batch_size, 1)) * dummy_w
         p = torch.zeros((batch_size, num_actions)) * dummy_w
         v = torch.zeros((batch_size, 1)) * dummy_w
         return nh, r, p, v
 
+    def mock_h_net(x, training=False):
+        # Identical direction to nh -> cosine_similarity = 1.0 -> consistency_loss = 0.0
+        return torch.ones((batch_size, 8))
+
     with patch.object(
             trainer,
             'sample_batch',
-            return_value=(obs, actions, target_policies, target_values, target_rewards)
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
     ), patch.object(
         trainer.network, 'initial_inference', side_effect=mock_init
     ), patch.object(
         trainer.network, 'recurrent_inference', side_effect=mock_rec
+    ), patch.object(
+        trainer.network, 'h_network', side_effect=mock_h_net
     ):
         metrics = trainer.train_step()
 
     expected_policy_loss = (3.0 * math.log(3.0)) / 3.0
     expected_value_loss = 2.0 / 3.0
     expected_reward_loss = 1.25 / 2.0
-    expected_total_loss = expected_policy_loss + expected_value_loss + expected_reward_loss
+    expected_consistency_loss = 0.0
+    expected_total_loss = (
+        expected_policy_loss + expected_value_loss + expected_reward_loss + expected_consistency_loss
+    )
 
     assert metrics["policy_loss"] == pytest.approx(expected_policy_loss, abs=1e-5)
     assert metrics["value_loss"] == pytest.approx(expected_value_loss, abs=1e-5)
     assert metrics["reward_loss"] == pytest.approx(expected_reward_loss, abs=1e-5)
+    assert metrics["consistency_loss"] == pytest.approx(expected_consistency_loss, abs=1e-5)
     assert metrics["total_loss"] == pytest.approx(expected_total_loss, abs=1e-5)
 
 
 def test_train_step_unroll_action_sequence_alignment(trainer):
     """Verify recurrent_inference receives actions[:, k - 1] in exact sequential order."""
     trainer.unroll_steps = 3
-    obs = torch.zeros((2, 2, 9), dtype=torch.float32)
+    obs = torch.zeros((2, 4, 2, 9), dtype=torch.float32)
     actions = torch.tensor([[1, 4, 7, 0], [2, 5, 8, 0]], dtype=torch.long)
     target_policies = torch.full((2, 4, 9), 1.0 / 9.0, dtype=torch.float32)
     target_values = torch.zeros((2, 4), dtype=torch.float32)
     target_rewards = torch.zeros((2, 4), dtype=torch.float32)
+    consistency_mask = torch.ones((2, 4), dtype=torch.float32)
 
     received_actions = []
     orig_rec = trainer.network.recurrent_inference
@@ -504,7 +531,7 @@ def test_train_step_unroll_action_sequence_alignment(trainer):
     with patch.object(
             trainer,
             'sample_batch',
-            return_value=(obs, actions, target_policies, target_values, target_rewards)
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
     ), patch.object(
         trainer.network, 'recurrent_inference', side_effect=spy_recurrent
     ):
@@ -525,11 +552,13 @@ def test_train_step_hidden_state_half_gradient_scaling(trainer):
     with torch.no_grad():
         trainer.network.h_param.copy_(torch.tensor([0.1]))
 
-    obs = torch.zeros((1, 2, 9), dtype=torch.float32)
+    obs = torch.zeros((1, 3, 2, 9), dtype=torch.float32)
     actions = torch.zeros((1, 3), dtype=torch.long)
     target_policies = torch.full((1, 3, 9), 1.0 / 9.0, dtype=torch.float32)
     target_values = torch.zeros((1, 3), dtype=torch.float32)
     target_rewards = torch.zeros((1, 3), dtype=torch.float32)
+    # Zero out consistency mask for k >= 1 to isolate reward gradient scaling cleanly
+    consistency_mask = torch.tensor([[1.0, 0.0, 0.0]], dtype=torch.float32)
 
     call_idx = {"step": 0}
 
@@ -550,7 +579,7 @@ def test_train_step_hidden_state_half_gradient_scaling(trainer):
     with patch.object(
             trainer,
             'sample_batch',
-            return_value=(obs, actions, target_policies, target_values, target_rewards)
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
     ), patch.object(
         trainer.network, 'initial_inference', side_effect=custom_init
     ), patch.object(
@@ -564,16 +593,17 @@ def test_train_step_hidden_state_half_gradient_scaling(trainer):
 
 def test_train_step_gradient_clipping_enforced(trainer):
     """Verify clip_grad_norm_(max_norm=0.5) caps exploding gradients."""
-    obs = torch.ones((4, 2, 9), dtype=torch.float32)
+    obs = torch.ones((4, 4, 2, 9), dtype=torch.float32)
     actions = torch.zeros((4, 4), dtype=torch.long)
     target_policies = torch.full((4, 4, 9), 1.0 / 9.0, dtype=torch.float32)
     target_values = torch.full((4, 4), 1000.0, dtype=torch.float32)
     target_rewards = torch.full((4, 4), 1000.0, dtype=torch.float32)
+    consistency_mask = torch.ones((4, 4), dtype=torch.float32)
 
     with patch.object(
             trainer,
             'sample_batch',
-            return_value=(obs, actions, target_policies, target_values, target_rewards)
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
     ):
         trainer.train_step()
 
@@ -589,7 +619,7 @@ def test_train_step_updates_all_networks_with_valid_gradients(trainer):
     """
     Verify train_step():
     - Sets all sub-networks to train mode.
-    - Computes finite scalar losses.
+    - Computes finite scalar losses including consistency_loss.
     - Produces non-zero gradients and updates weights across h, g, and f networks.
     """
     game_data = trainer.self_play_game()
@@ -602,14 +632,15 @@ def test_train_step_updates_all_networks_with_valid_gradients(trainer):
 
     metrics = trainer.train_step()
 
-    for key in ("total_loss", "policy_loss", "value_loss", "reward_loss"):
+    for key in ("total_loss", "policy_loss", "value_loss", "reward_loss", "consistency_loss"):
         assert key in metrics
         assert isinstance(metrics[key], float)
         assert not math.isnan(metrics[key])
         assert not math.isinf(metrics[key])
 
     assert metrics["total_loss"] == pytest.approx(
-        metrics["policy_loss"] + metrics["value_loss"] + metrics["reward_loss"], abs=1e-6
+        metrics["policy_loss"] + metrics["value_loss"] + metrics["reward_loss"] + metrics["consistency_loss"],
+        abs=1e-6
     )
 
     assert trainer.network.h_param.grad is not None
@@ -628,13 +659,210 @@ def test_train_step_updates_all_networks_with_valid_gradients(trainer):
     trainer.network.g_network.train.assert_called()
 
 
+# --------------------------------------------------------------------------
+# Consistency Loss Tests
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "target_vec, expected_loss",
+    [
+        ([1.0, 0.0, 0.0, 0.0], 0.0),   # Identical direction: (-1 + 1) / 2 = 0.0
+        ([0.0, 1.0, 0.0, 0.0], 0.5),   # Orthogonal vectors:  ( 0 + 1) / 2 = 0.5
+        ([-1.0, 0.0, 0.0, 0.0], 1.0),  # Opposite direction:  (+1 + 1) / 2 = 1.0
+    ],
+)
+def test_consistency_loss_exact_cosine_distance_values(trainer, target_vec, expected_loss):
+    """
+    Verify consistency_loss computes (-cosine_similarity + 1.0) / 2.0 accurately
+    for aligned (0.0), orthogonal (0.5), and opposite (1.0) latent vectors.
+    """
+    trainer.unroll_steps = 1
+    obs = torch.zeros((2, 2, 2, 9), dtype=torch.float32)
+    actions = torch.zeros((2, 2), dtype=torch.long)
+    target_policies = torch.full((2, 2, 9), 1.0 / 9.0, dtype=torch.float32)
+    target_values = torch.zeros((2, 2), dtype=torch.float32)
+    target_rewards = torch.zeros((2, 2), dtype=torch.float32)
+    consistency_mask = torch.ones((2, 2), dtype=torch.float32)
+
+    pred_dir = torch.tensor([[1.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+    target_tensor = torch.tensor([target_vec, target_vec], dtype=torch.float32)
+
+    def mock_init(x, training=False):
+        h = pred_dir * trainer.network.h_param
+        return h, torch.zeros((2, 9)), torch.zeros((2, 1))
+
+    def mock_rec(h, a, training=False):
+        nh = pred_dir * trainer.network.g_param
+        return nh, torch.zeros((2, 1)), torch.zeros((2, 9)), torch.zeros((2, 1))
+
+    with patch.object(
+            trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
+    ), patch.object(
+        trainer.network, 'initial_inference', side_effect=mock_init
+    ), patch.object(
+        trainer.network, 'recurrent_inference', side_effect=mock_rec
+    ), patch.object(
+        trainer.network, 'h_network', return_value=target_tensor
+    ):
+        metrics = trainer.train_step()
+
+    assert metrics["consistency_loss"] == pytest.approx(expected_loss, abs=1e-5)
+
+
+def test_consistency_loss_masks_padding_steps_and_excludes_step_zero(trainer):
+    """
+    Verify consistency_loss:
+    - Ignores padded future steps where consistency_mask[:, k] == 0.
+    - Normalizes strictly by consistency_mask[:, 1:].sum() (excluding k == 0).
+    """
+    trainer.unroll_steps = 2
+    obs = torch.zeros((2, 3, 2, 9), dtype=torch.float32)
+    actions = torch.zeros((2, 3), dtype=torch.long)
+    target_policies = torch.full((2, 3, 9), 1.0 / 9.0, dtype=torch.float32)
+    target_values = torch.zeros((2, 3), dtype=torch.float32)
+    target_rewards = torch.zeros((2, 3), dtype=torch.float32)
+
+    # Sample 0: valid at k=0, 1, 2
+    # Sample 1: valid at k=0, 1; PADDED at k=2
+    # Total valid steps for k >= 1 is 3 (NOT 5)
+    consistency_mask = torch.tensor([
+        [1.0, 1.0, 1.0],
+        [1.0, 1.0, 0.0],
+    ], dtype=torch.float32)
+
+    pred_dir = torch.tensor([[1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+    # k=1: Sample 0 orthogonal (loss=0.5), Sample 1 aligned (loss=0.0)
+    # k=2: Sample 0 orthogonal (loss=0.5), Sample 1 opposite (loss=1.0 -> MUST be masked out)
+    h_targets = [
+        torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=torch.float32),
+        torch.tensor([[0.0, 1.0], [-1.0, 0.0]], dtype=torch.float32),
+    ]
+
+    def mock_init(x, training=False):
+        return pred_dir * trainer.network.h_param, torch.zeros((2, 9)), torch.zeros((2, 1))
+
+    def mock_rec(h, a, training=False):
+        return pred_dir * trainer.network.g_param, torch.zeros((2, 1)), torch.zeros((2, 9)), torch.zeros((2, 1))
+
+    with patch.object(
+            trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
+    ), patch.object(
+        trainer.network, 'initial_inference', side_effect=mock_init
+    ), patch.object(
+        trainer.network, 'recurrent_inference', side_effect=mock_rec
+    ), patch.object(
+        trainer.network, 'h_network', side_effect=h_targets
+    ):
+        metrics = trainer.train_step()
+
+    # Valid losses: (0.5 + 0.0 + 0.5) / 3 = 1.0 / 3.0
+    assert metrics["consistency_loss"] == pytest.approx(1.0 / 3.0, abs=1e-5)
+
+
+def test_consistency_loss_handles_all_padded_future_steps_without_nan(trainer):
+    """
+    Verify clamp_min(1) prevents division-by-zero / NaN when every sample in the batch
+    starts at a terminal step (all consistency_mask[:, 1:] == 0).
+    """
+    trainer.unroll_steps = 2
+    obs = torch.zeros((2, 3, 2, 9), dtype=torch.float32)
+    actions = torch.zeros((2, 3), dtype=torch.long)
+    target_policies = torch.full((2, 3, 9), 1.0 / 9.0, dtype=torch.float32)
+    target_values = torch.zeros((2, 3), dtype=torch.float32)
+    target_rewards = torch.zeros((2, 3), dtype=torch.float32)
+    consistency_mask = torch.tensor([
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ], dtype=torch.float32)
+
+    with patch.object(
+            trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
+    ):
+        metrics = trainer.train_step()
+
+    assert not math.isnan(metrics["consistency_loss"])
+    assert not math.isinf(metrics["consistency_loss"])
+    assert metrics["consistency_loss"] == pytest.approx(0.0, abs=1e-6)
+
+
+def test_consistency_loss_stops_gradient_on_target_h_network_and_passes_correct_obs(trainer):
+    """
+    Verify that the target branch h_network(obs[:, k], training=False):
+    - Receives obs[:, k] in exact sequential order with training=False.
+    - Executes under torch.no_grad() (stop-gradient), so target weights receive no gradient
+      from consistency_loss while g_network parameters do.
+    """
+    trainer.unroll_steps = 2
+    obs = torch.stack([
+        torch.full((2, 2, 9), 0.0),
+        torch.full((2, 2, 9), 1.0),
+        torch.full((2, 2, 9), 2.0),
+    ], dim=1)  # shape: (B=2, K+1=3, 2, 9)
+    actions = torch.zeros((2, 3), dtype=torch.long)
+    target_policies = torch.full((2, 3, 9), 1.0 / 9.0, dtype=torch.float32)
+    target_values = torch.zeros((2, 3), dtype=torch.float32)
+    target_rewards = torch.zeros((2, 3), dtype=torch.float32)
+    consistency_mask = torch.ones((2, 3), dtype=torch.float32)
+
+    target_only_param = nn.Parameter(torch.tensor([[0.0, 1.0]], requires_grad=True))
+    grad_enabled_flags = []
+    received_obs_means = []
+    received_training_flags = []
+
+    def spy_h_network(x, training=True):
+        grad_enabled_flags.append(torch.is_grad_enabled())
+        received_obs_means.append(x.mean().item())
+        received_training_flags.append(training)
+        return target_only_param.expand(x.shape[0], 2)
+
+    def mock_init(x, training=False):
+        return torch.tensor([[1.0, 0.0], [1.0, 0.0]]), torch.zeros((2, 9)), torch.zeros((2, 1))
+
+    def mock_rec(h, a, training=False):
+        # Differentiable non-trivial direction w.r.t. g_param so cosine gradient is non-zero
+        nh = torch.stack([
+            torch.ones(2) * trainer.network.g_param,
+            torch.ones(2) * 0.5
+        ], dim=-1)
+        return nh, torch.zeros((2, 1)), torch.zeros((2, 9)), torch.zeros((2, 1))
+
+    with patch.object(
+            trainer,
+            'sample_batch',
+            return_value=(obs, actions, target_policies, target_values, target_rewards, consistency_mask)
+    ), patch.object(
+        trainer.network, 'initial_inference', side_effect=mock_init
+    ), patch.object(
+        trainer.network, 'recurrent_inference', side_effect=mock_rec
+    ), patch.object(
+        trainer.network, 'h_network', side_effect=spy_h_network
+    ):
+        trainer.train_step()
+
+    # h_network must be called for k=1 and k=2 under torch.no_grad() with training=False
+    assert grad_enabled_flags == [False, False]
+    assert received_training_flags == [False, False]
+    assert received_obs_means == pytest.approx([1.0, 2.0])
+
+    # Stop-gradient: target parameter receives no gradient, while g_param is updated
+    assert target_only_param.grad is None
+    assert trainer.network.g_param.grad is not None
+    assert trainer.network.g_param.grad.item() != 0.0
+
+
 # ==============================================================================
 # 4. Full Training Loop & Evaluator Tests
 # ==============================================================================
 
 @patch('model.trainer.save_checkpoint')
 def test_run_loop_min_buffer_gating_and_history(mock_save_checkpoint, trainer):
-    """Verify run() defers training until min_buffer_size is reached and logs history."""
+    """Verify run() defers training until min_buffer_size is reached and logs history including consistency_loss."""
     history = trainer.run(
         evaluator=MagicMock(),
         checkpoint_path="./dummy_checkpoints",
@@ -649,6 +877,9 @@ def test_run_loop_min_buffer_gating_and_history(mock_save_checkpoint, trainer):
     assert len(history) == 2
     assert history[0]["iteration"] == 2
     assert history[0]["buffer_size"] == 4
+    assert "consistency_loss" in history[0]
+    assert isinstance(history[0]["consistency_loss"], float)
+    assert not math.isnan(history[0]["consistency_loss"])
     assert history[1]["iteration"] == 3
     assert history[1]["buffer_size"] == 6
 

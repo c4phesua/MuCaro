@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
-from torch.nn.functional import cross_entropy, mse_loss
+from torch.nn.functional import cross_entropy, mse_loss, cosine_similarity
 from torch.nn.utils import clip_grad_norm_
 
 from environment.caro import Board
@@ -113,66 +113,78 @@ class MuCaroTrainer:
             "values": target_values,
         }
 
-    def sample_batch(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def sample_batch(self) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Samples a batch of unroll trajectories from the replay buffer."""
         action_space_size = self.mcts.action_space_size
-        obs_batch, actions_batch, policies_batch, values_batch, rewards_batch = [], [], [], [], []
+        obs_batch, actions_batch, policies_batch, values_batch, rewards_batch, con_mask_batch = [], [], [], [], [], []
 
         sampled_games = random.choices(self.replay_buffer, k=self.batch_size)
         for game in sampled_games:
             game_len = len(game["observations"])
             start_idx = random.randint(0, game_len - 1)
 
-            obs_batch.append(game["observations"][start_idx])
-
-            act_seq, pol_seq, val_seq, rew_seq = [], [], [], []
+            obs_seq, act_seq, pol_seq, val_seq, rew_seq, mask_seq = [], [], [], [], [], []
             for k in range(self.unroll_steps + 1):
                 idx = start_idx + k
                 if idx < game_len:
+                    obs_seq.append(game["observations"][idx])
                     act_seq.append(game["actions"][idx])
                     pol_seq.append(game["policies"][idx])
                     val_seq.append(game["values"][idx])
                     rew_seq.append(game["rewards"][idx])
+                    mask_seq.append(1)
                 else:
                     # Absorbing state padding after terminal step
+                    obs_seq.append(torch.zeros_like(game["observations"][0]))
                     act_seq.append(0)
                     pol_seq.append(np.zeros(action_space_size, dtype=np.float32))
                     val_seq.append(0.0)
                     rew_seq.append(0.0)
-
+                    mask_seq.append(0)
+            obs_batch.append(torch.stack(obs_seq).to(dtype=torch.float32))
             actions_batch.append(act_seq)
             policies_batch.append(pol_seq)
             values_batch.append(val_seq)
             rewards_batch.append(rew_seq)
-
+            con_mask_batch.append(mask_seq)
         return (
             torch.stack(obs_batch).to(dtype=torch.float32),
             torch.tensor(np.array(actions_batch), dtype=torch.long),
             torch.tensor(np.array(policies_batch), dtype=torch.float32),
             torch.tensor(np.array(values_batch), dtype=torch.float32),
             torch.tensor(np.array(rewards_batch), dtype=torch.float32),
+            torch.tensor(np.array(con_mask_batch), dtype=torch.float32)
         )
 
     def train_step(self) -> Dict[str, float]:
         self._set_train_mode()
-        obs, actions, target_policies, target_values, target_rewards = self.sample_batch()
-        init_hidden_states, init_pred_policies, init_pred_values = self.network.initial_inference(obs, training=True)
+        obs, actions, target_policies, target_values, target_rewards, consistency_mask = self.sample_batch()
+        init_hidden_states, init_pred_policies, init_pred_values = self.network.initial_inference(obs[:, 0],
+                                                                                                  training=True)
         policy_loss = cross_entropy(init_pred_policies, target_policies[:, 0])
         value_loss = mse_loss(init_pred_values.squeeze(-1), target_values[:, 0])
         reward_loss = torch.tensor(0.0, dtype=torch.float32)
+        consistency_loss = torch.tensor(0.0, dtype=torch.float32)
         hidden_state = init_hidden_states
         for k in range(1, self.unroll_steps + 1):
             hidden_state = hidden_state * 0.5 + hidden_state.detach() * 0.5
             hidden_state, pred_reward, pred_policy, pred_value = self.network.recurrent_inference(
                 hidden_state, actions[:, k - 1], training=True
             )
+            with torch.no_grad():
+                h_hidden_state = self.network.h_network(obs[:, k], training=False)
+            cosine_loss = cosine_similarity(hidden_state, h_hidden_state)
+            cosine_loss = (-cosine_loss + 1.0) / 2.0
+            cosine_loss = cosine_loss * consistency_mask[:, k]
+            consistency_loss += cosine_loss.sum()
             policy_loss += cross_entropy(pred_policy, target_policies[:, k])
             value_loss += mse_loss(pred_value.squeeze(-1), target_values[:, k])
             reward_loss += mse_loss(pred_reward.squeeze(-1), target_rewards[:, k - 1])
         policy_loss = policy_loss / (self.unroll_steps + 1)
         value_loss = value_loss / (self.unroll_steps + 1)
         reward_loss = reward_loss / self.unroll_steps
-        total_loss = policy_loss + value_loss + reward_loss
+        consistency_loss = consistency_loss / consistency_mask[:, 1:].sum().clamp_min(1)
+        total_loss = policy_loss + value_loss + reward_loss + consistency_loss
         self.optimizer.zero_grad()
         total_loss.backward()
         clip_grad_norm_(self.network.params(), max_norm=0.5)
@@ -182,6 +194,7 @@ class MuCaroTrainer:
             "policy_loss": policy_loss.item(),
             "value_loss": value_loss.item(),
             "reward_loss": reward_loss.item(),
+            "consistency_loss": consistency_loss.item()
         }
 
     def run(
@@ -209,7 +222,8 @@ class MuCaroTrainer:
                 continue
 
             # 2. Train networks on sampled trajectories
-            iter_metrics = {"total_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "reward_loss": 0.0}
+            iter_metrics = {"total_loss": 0.0, "policy_loss": 0.0, "value_loss": 0.0, "reward_loss": 0.0,
+                            "consistency_loss": 0.0}
             for _ in range(train_steps_per_iter):
                 metrics = self.train_step()
                 for key in iter_metrics:
@@ -235,6 +249,7 @@ class MuCaroTrainer:
                 f"(P: {iter_metrics['policy_loss']:.4f}, "
                 f"V: {iter_metrics['value_loss']:.4f}, "
                 f"R: {iter_metrics['reward_loss']:.4f})"
+                f"C: {iter_metrics['consistency_loss']:.4f})"
             )
             if iter_metrics['eval']:
                 e = iter_metrics['eval']
