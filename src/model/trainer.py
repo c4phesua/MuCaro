@@ -248,7 +248,7 @@ class MuCaroTrainer:
                 f"Loss: {iter_metrics['total_loss']:.4f} "
                 f"(P: {iter_metrics['policy_loss']:.4f}, "
                 f"V: {iter_metrics['value_loss']:.4f}, "
-                f"R: {iter_metrics['reward_loss']:.4f})"
+                f"R: {iter_metrics['reward_loss']:.4f}, "
                 f"C: {iter_metrics['consistency_loss']:.4f})"
             )
             if iter_metrics['eval']:
