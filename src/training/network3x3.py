@@ -1,6 +1,6 @@
 import torch
 from keras import Sequential, Input, Model
-from keras.src.layers import Flatten, Dense, LayerNormalization, Embedding, Concatenate
+from keras.layers import Flatten, Dense, LayerNormalization, Embedding, Concatenate
 
 from model.network import MuCaroNetwork
 
