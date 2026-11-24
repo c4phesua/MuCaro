@@ -27,7 +27,7 @@ if __name__ == '__main__':
     mcts.root_dirichlet_alpha = 0.8
     trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts, use_valid_mask=True, unroll_steps=5,
                             discount=GAMMA, temp_threshold=2, buffer_size=10000, lr=1e-3)
-    trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
-    trainer.set_lr(2e-4)
+    # trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
+    # trainer.set_lr(2e-4)
     trainer.run(evaluator=random_evaluator, num_iterations=500, train_steps_per_iter=10,
                 model_name='3x3-v5', checkpoint_path='../../checkpoints')

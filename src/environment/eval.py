@@ -9,14 +9,12 @@ from mcts.tree import MCTS
 
 @torch.inference_mode()
 def random_evaluator(mcts: MCTS, env: Board, step_num, use_valid_mask: bool = True):
-    total_win = 0
-    total_tie = 0
-    total_lose = 0
-    for _ in range(step_num):
+    total_win, total_tie, total_lose, total_invalid = 0, 0, 0, 0
+    for game_idx in range(step_num):
         state_info = env.reset()
         current_state = state_info['next_state']
         done = False
-        model_play_id = random.randint(0, 1)
+        model_play_id = game_idx % 2
         invalid_move_made = False
         while not done:
             if model_play_id == env.current_player:
@@ -28,6 +26,7 @@ def random_evaluator(mcts: MCTS, env: Board, step_num, use_valid_mask: bool = Tr
                 except ValueError as ex:
                     # handle model pick invalid move
                     total_lose += 1
+                    total_invalid += 1
                     invalid_move_made = True
                     break
             else:
@@ -45,4 +44,5 @@ def random_evaluator(mcts: MCTS, env: Board, step_num, use_valid_mask: bool = Tr
             total_tie += 1
         else:
             total_lose += 1
-    return {'win': total_win, 'lose': total_lose, 'tie': total_tie, 'win_percentage': total_win / step_num}
+    return {'win': total_win, 'lose': total_lose, 'invalid': total_invalid, 'tie': total_tie,
+            'win_percentage': total_win / step_num}

@@ -211,6 +211,7 @@ def mock_evaluator():
     evaluator.return_value = {
         'win': 8,
         'lose': 2,
+        'invalid': 1,
         'tie': 0,
         'win_percentage': 0.8
     }
@@ -1270,7 +1271,7 @@ def test_run_loop_sets_eval_mode_before_evaluator(mock_save_checkpoint, trainer)
 
     def spy_evaluator(mcts, env, step_num, use_valid_mask=True):
         modes_during_eval.append(active_modes.copy())
-        return {'win': 5, 'lose': 5, 'tie': 0, 'win_percentage': 0.5}
+        return {'win': 5, 'lose': 5, 'invalid': 3, 'tie': 0, 'win_percentage': 0.5}
 
     # Iteration 1: trains only (no eval) -> networks remain in 'train' mode at end of iter
     trainer.run(
