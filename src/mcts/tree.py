@@ -24,7 +24,7 @@ class MCTS:
             raise ValueError("Number of simulation must greater than 0")
         minmax_norm = MinMaxStats(-1, 1)
         current_state = current_state.unsqueeze(0)
-        with torch.no_grad():
+        with torch.inference_mode():
             hidden_state, policy, _ = self.network.initial_inference(current_state)
             if valid_mask is not None:
                 valid_mask_tensor = ~torch.tensor(valid_mask, dtype=torch.bool)

@@ -16,18 +16,20 @@ if __name__ == '__main__':
     mu_network.f_network.summary()
     mu_network.g_network.summary()
     mu_network.verify_contract((2, 9), 9)
-    checkpoint = torch.load('../../checkpoints/3x3-v5-60-76pct.pt')
+    checkpoint = torch.load('../../checkpoints/3x3-v6-860-86pct.pt')
     mu_network.h_network.load_state_dict(checkpoint["h_network_state"])
     mu_network.f_network.load_state_dict(checkpoint["f_network_state"])
     mu_network.g_network.load_state_dict(checkpoint["g_network_state"])
+    mu_network.projector_network.load_state_dict(checkpoint["projector_network_state"])
+    mu_network.predictor_network.load_state_dict(checkpoint["predictor_network_state"])
     print(checkpoint['eval_stats'])
     env = Board()
     mcts = MCTS(network=mu_network, action_space_size=9)
     mcts.gamma = GAMMA
-    mcts.root_dirichlet_alpha = 0.8
-    trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts, use_valid_mask=True, unroll_steps=5,
-                            discount=GAMMA, temp_threshold=2, buffer_size=10000, lr=1e-3)
+    mcts.root_dirichlet_alpha = 1.0
+    trainer = MuCaroTrainer(env=env, network=mu_network, mcts=mcts, use_valid_mask=True, unroll_steps=3,
+                            discount=GAMMA, temp_threshold=2, buffer_size=800, lr=1e-3, num_simulations=50)
     trainer.optimizer.load_state_dict(checkpoint["optimizer_state"])
-    trainer.set_lr(5e-4)
-    trainer.run(evaluator=random_evaluator, num_iterations=500, train_steps_per_iter=10,
+    trainer.set_lr(1e-4)
+    trainer.run(evaluator=random_evaluator, num_iterations=1000, train_steps_per_iter=10,
                 model_name='3x3-v6', checkpoint_path='../../checkpoints')

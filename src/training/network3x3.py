@@ -16,11 +16,12 @@ def get_mucaro_3x3_network():
 
     f_input = Input(shape=(32,))
 
-    f_value_layers = Dense(16, activation='silu')(f_input)
-    f_value_layers = Dense(4, activation='silu')(f_value_layers)
+    f_value_layers = Dense(64, activation='silu')(f_input)
+    f_value_layers = LayerNormalization()(f_value_layers)
+    f_value_layers = Dense(32, activation='silu')(f_value_layers)
     f_value_layers = Dense(1, activation='tanh')(f_value_layers)
 
-    f_policy_layers = Dense(16, 'silu')(f_input)
+    f_policy_layers = Dense(64, 'silu')(f_input)
     f_policy_layers = Dense(9, 'linear')(f_policy_layers)
     mu_network.f_network = Model(inputs=f_input, outputs=[f_policy_layers, f_value_layers])
 
