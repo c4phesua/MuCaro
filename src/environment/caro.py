@@ -42,7 +42,7 @@ class Board:
         if self.state[0][index].item() != 0.0 or self.state[1][index].item() != 0.0:
             raise ValueError('Invalid move')
         self.state[self.current_player][index] = 1
-        win_check = self.check_win(index)
+        win_check = self.check_win(current_index=index)
         if win_check == -1:
             self.done = True
             return {'next_state': self.get_canonical_state(), 'winner': -1, 'done': True}
@@ -52,35 +52,46 @@ class Board:
         self.current_player = (self.current_player + 1) % 2
         return {'next_state': self.get_canonical_state(), 'winner': None, 'done': False}
 
-    def check_win(self, current_index: int):
+    def check_win(self, current_index: int, is_restricted: bool = False):
         check_vectors = [[0, 1], [1, 0], [1, 1], [1, -1]]
         current_x = current_index % self.size
         current_y = current_index // self.size
         player_state = self.state[self.current_player]
+        opponent_state = self.state[(self.current_player + 1) % 2]
         for dx, dy in check_vectors:
             counter = 1
-            for step in range(1, self.m):
+            block_end = 0
+            # forward direction
+            for step in range(1, self.m + 1):
                 check_x = current_x + step * dx
                 check_y = current_y + step * dy
                 if 0 <= check_x < self.size and 0 <= check_y < self.size:
-                    if int(player_state[check_y * self.size + check_x].item()) == 1:
+                    check_index = check_y * self.size + check_x
+                    if int(player_state[check_index].item()) == 1:
                         counter += 1
                     else:
+                        if int(opponent_state[check_index].item()) == 1:
+                            block_end += 1
                         break
                 else:
                     break
-
-            for step in range(1, self.m):
+            # backward direction
+            for step in range(1, self.m + 1):
                 check_x = current_x - step * dx
                 check_y = current_y - step * dy
                 if 0 <= check_x < self.size and 0 <= check_y < self.size:
-                    if int(player_state[check_y * self.size + check_x].item()) == 1:
+                    check_index = check_y * self.size + check_x
+                    if int(player_state[check_index].item()) == 1:
                         counter += 1
                     else:
+                        if int(opponent_state[check_index].item()) == 1:
+                            block_end += 1
                         break
                 else:
                     break
-            if counter == self.m:
+            if not is_restricted and counter >= self.m:
+                return 1
+            if is_restricted and counter == self.m and block_end < 2:
                 return 1
         # check for tie
         total_move = self.state.sum().item()
