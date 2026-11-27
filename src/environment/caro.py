@@ -3,12 +3,13 @@ from torch import zeros
 
 
 class Board:
-    def __init__(self, size: int = 3, win_length: int = 3):
+    def __init__(self, size: int = 3, win_length: int = 3, is_restricted: bool = False):
         self.current_player = 0
         self.state = zeros((2, size * size), dtype=torch.float32, requires_grad=False)
         self.size = size
         self.m = win_length
         self.done = False
+        self.is_restricted = is_restricted
 
     def render_board(self, printable=False):
         screen = [[0 for j in range(self.size)] for i in range(self.size)]
@@ -37,12 +38,14 @@ class Board:
 
     def play(self, index: int):
         # this one will return json like object (next_state, winner, done)
+        if not (0 <= index < len(self.state[0])):
+            raise ValueError('Move out of range')
         if self.done:
             raise Exception('Game is done, please reset the board')
         if self.state[0][index].item() != 0.0 or self.state[1][index].item() != 0.0:
             raise ValueError('Invalid move')
         self.state[self.current_player][index] = 1
-        win_check = self.check_win(current_index=index)
+        win_check = self.check_win(current_index=index, is_restricted=self.is_restricted)
         if win_check == -1:
             self.done = True
             return {'next_state': self.get_canonical_state(), 'winner': -1, 'done': True}
@@ -56,8 +59,8 @@ class Board:
         check_vectors = [[0, 1], [1, 0], [1, 1], [1, -1]]
         current_x = current_index % self.size
         current_y = current_index // self.size
-        player_state = self.state[self.current_player]
-        opponent_state = self.state[(self.current_player + 1) % 2]
+        player_state = self.state[self.current_player].tolist()
+        opponent_state = self.state[(self.current_player + 1) % 2].tolist()
         for dx, dy in check_vectors:
             counter = 1
             block_end = 0
@@ -67,10 +70,10 @@ class Board:
                 check_y = current_y + step * dy
                 if 0 <= check_x < self.size and 0 <= check_y < self.size:
                     check_index = check_y * self.size + check_x
-                    if int(player_state[check_index].item()) == 1:
+                    if int(player_state[check_index]) == 1:
                         counter += 1
                     else:
-                        if int(opponent_state[check_index].item()) == 1:
+                        if int(opponent_state[check_index]) == 1:
                             block_end += 1
                         break
                 else:
@@ -81,10 +84,10 @@ class Board:
                 check_y = current_y - step * dy
                 if 0 <= check_x < self.size and 0 <= check_y < self.size:
                     check_index = check_y * self.size + check_x
-                    if int(player_state[check_index].item()) == 1:
+                    if int(player_state[check_index]) == 1:
                         counter += 1
                     else:
-                        if int(opponent_state[check_index].item()) == 1:
+                        if int(opponent_state[check_index]) == 1:
                             block_end += 1
                         break
                 else:
@@ -100,4 +103,4 @@ class Board:
         return 0
 
     def get_legal_mask(self):
-        return [not bool(self.state[0][i] + self.state[1][i]) for i in range(self.size * self.size)]
+        return ((self.state[0] + self.state[1]) == 0).tolist()
