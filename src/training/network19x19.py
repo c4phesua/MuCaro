@@ -75,3 +75,20 @@ def get_mucaro_19x19_network():
     h_network = LayerNormalization()(h_network)
     mu_network.h_network = Model(inputs=h_input, outputs=h_network, name='h_network')
     mu_network.h_network.summary()
+
+    # F network setup
+    f_input = Input(shape=(512,))
+    v_head = Dense(256, use_bias=False)(f_input)
+    v_head = LayerNormalization()(v_head)
+    v_head = Activation(activation='silu')(v_head)
+    v_head = Dense(32, use_bias=False)(v_head)
+    v_head = LayerNormalization()(v_head)
+    v_head = Activation(activation='silu')(v_head)
+    v_head = Dense(1, kernel_initializer='zeros', activation='tanh')(v_head)
+
+    p_head = Dense(512, use_bias=False)(f_input)
+    p_head = LayerNormalization()(p_head)
+    p_head = Activation(activation='silu')(p_head)
+    p_head = Dense(361, kernel_initializer='zeros', activation='linear')(p_head)
+    mu_network.f_network = Model(inputs=f_input, outputs=[p_head, v_head])
+    mu_network.f_network.summary()
