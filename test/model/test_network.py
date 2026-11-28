@@ -233,23 +233,135 @@ def test_params_method(setup_network):
         assert actual_param is expected_param, "A parameter in the returned list does not match the expected parameter."
 
 
-def test_consistency_project_output_and_no_grad(setup_network):
-    """Verifies consistency_project output shape, stop-gradient behavior, and BN running stats preservation."""
+
+def _get_bn_layers(model):
+    return [layer for layer in model.layers if layer.__class__.__name__ == "BatchNormalization"]
+
+
+def test_consistency_project_train_mode(setup_network):
+    """Verifies training=True mode: output shape, stop-gradient via @torch.no_grad(), and BN batch stats update."""
+    torch.manual_seed(42)
     net, obs_shape, _, hidden_size = setup_network
     batch_size = 4
     dummy_obs = torch.rand((batch_size, *obs_shape), requires_grad=True)
 
-    # Snapshot Keras BatchNorm moving_mean before calling consistency_project
-    bn_layer = net.projector_network.layers[1]
-    initial_moving_mean = bn_layer.moving_mean.value.clone()
+    bn_layers = _get_bn_layers(net.projector_network)
+    initial_means = [bn.moving_mean.value.clone() for bn in bn_layers]
 
-    z_target = net.consistency_project(dummy_obs)
+    z_target = net.consistency_project(dummy_obs, training=True)
 
     assert z_target.shape == (batch_size, hidden_size)
+    assert torch.isfinite(z_target).all(), "z_target contains NaN or Inf values."
     assert z_target.requires_grad is False, "consistency_project must detach gradients via @torch.no_grad()."
-    assert torch.equal(bn_layer.moving_mean.value, initial_moving_mean), (
-        "consistency_project must run in inference mode (training=False) without updating BN stats."
+    assert z_target.grad_fn is None
+
+    # Verify BN updates running stats when training=True
+    for bn, init_mean in zip(bn_layers, initial_means):
+        assert not torch.equal(bn.moving_mean.value, init_mean), (
+            "BN moving_mean must update when consistency_project runs with training=True."
+        )
+
+    # Final layer of Projector is BN (initialized with gamma=1, beta=0) -> batch mean should be ~0
+    batch_mean = z_target.mean(dim=0)
+    assert torch.allclose(batch_mean, torch.zeros_like(batch_mean), atol=1e-5), (
+        "Projector output in training=True mode must be normalized to mean ~0 along the batch dimension."
     )
+
+
+def test_consistency_project_eval_mode(setup_network):
+    """Verifies training=False mode: stop-gradient, frozen BN running stats, and deterministic output."""
+    torch.manual_seed(42)
+    net, obs_shape, _, hidden_size = setup_network
+    batch_size = 4
+    dummy_obs = torch.rand((batch_size, *obs_shape), requires_grad=True)
+
+    bn_layers = _get_bn_layers(net.projector_network)
+    initial_means = [bn.moving_mean.value.clone() for bn in bn_layers]
+    initial_vars = [bn.moving_variance.value.clone() for bn in bn_layers]
+
+    z1 = net.consistency_project(dummy_obs, training=False)
+    z2 = net.consistency_project(dummy_obs, training=False)
+
+    assert z1.shape == (batch_size, hidden_size)
+    assert z1.requires_grad is False
+    assert torch.equal(z1, z2), "consistency_project(training=False) must be deterministic for identical inputs."
+
+    for bn, init_mean, init_var in zip(bn_layers, initial_means, initial_vars):
+        assert torch.equal(bn.moving_mean.value, init_mean), (
+            "BN moving_mean must not change when training=False."
+        )
+        assert torch.equal(bn.moving_variance.value, init_var), (
+            "BN moving_variance must not change when training=False."
+        )
+
+
+def test_consistency_simsiam_gradient_isolation(setup_network):
+    """Verifies SimSiam/EfficientZero gradient flow:
+    - Gradients flow into g_network, projector_network, and predictor_network.
+    - NO gradients flow into h_network through the target branch.
+    """
+    torch.manual_seed(42)
+    net, obs_shape, action_space_size, hidden_size = setup_network
+    batch_size = 4
+
+    for p in net.params():
+        p.grad = None
+
+    next_obs = torch.rand((batch_size, *obs_shape))
+    # Detached hidden_state to isolate gradient flow coming strictly from consistency loss
+    hidden_state = torch.randn((batch_size, hidden_size))
+    action = torch.randint(0, action_space_size, (batch_size, 1), dtype=torch.long)
+
+    next_hidden, _, _, _ = net.recurrent_inference(hidden_state, action, training=True)
+    pred = net.consistency_predict(next_hidden, training=True)
+    target = net.consistency_project(next_obs, training=True)
+
+    # EfficientZero negative cosine similarity loss
+    loss = -F.cosine_similarity(pred, target, dim=-1).mean()
+    loss.backward()
+
+    def has_nonzero_grad(model):
+        return any(
+            p.grad is not None and p.grad.abs().sum().item() > 0
+            for p in model.parameters()
+            if p.requires_grad
+        )
+
+    assert not has_nonzero_grad(net.h_network), (
+        "Gradients must not leak into h_network from the target branch (stop-gradient broken)."
+    )
+    assert has_nonzero_grad(net.g_network), "Consistency loss must propagate gradients to g_network."
+    assert has_nonzero_grad(net.projector_network), "Consistency loss must propagate gradients to projector_network."
+    assert has_nonzero_grad(net.predictor_network), "Consistency loss must propagate gradients to predictor_network."
+
+
+def test_consistency_different_inputs_produce_distinct_projections(setup_network):
+    """Verifies that the projector does not collapse distinct observations to identical vectors."""
+    torch.manual_seed(42)
+    net, obs_shape, _, _ = setup_network
+
+    obs_a = torch.zeros((2, *obs_shape))
+    obs_b = torch.ones((2, *obs_shape))
+
+    z_a = net.consistency_project(obs_a, training=False)
+    z_b = net.consistency_project(obs_b, training=False)
+
+    assert not torch.allclose(z_a, z_b, atol=1e-4), (
+        "Distinct board observations produced identical projection vectors."
+    )
+
+
+def test_consistency_eval_mode_supports_batch_size_one(setup_network):
+    """Verifies eval mode produces finite outputs with batch_size=1 without BN zero-variance issues."""
+    net, obs_shape, _, hidden_size = setup_network
+    single_obs = torch.rand((1, *obs_shape))
+    single_hidden = torch.randn((1, hidden_size))
+
+    z = net.consistency_project(single_obs, training=False)
+    pred = net.consistency_predict(single_hidden, training=False)
+
+    assert z.shape == (1, hidden_size) and torch.isfinite(z).all()
+    assert pred.shape == (1, hidden_size) and torch.isfinite(pred).all()
 
 
 def test_consistency_predict_output_and_training_flag(setup_network):

@@ -1,6 +1,7 @@
+import torch
 from keras import Input, Model, Layer, ops
 from keras.layers import Conv2D, Activation, Add, LayerNormalization, Reshape, MultiHeadAttention, Flatten, Dense, \
-    Permute, Embedding, GroupNormalization
+    Permute, Embedding, GroupNormalization, Concatenate
 from keras.src.saving import register_keras_serializable
 
 from model.network import MuCaroNetwork
@@ -54,6 +55,7 @@ def residual_block(layer_x, filters, strides):
 
 def get_mucaro_19x19_network():
     mu_network = MuCaroNetwork()
+    # H network setup
     h_input = Input(shape=(2, 361))
     h_x = Reshape(target_shape=(2, 19, 19))(h_input)
     h_x = residual_block(h_x, 32, strides=1)
@@ -68,12 +70,12 @@ def get_mucaro_19x19_network():
         value=h_x,
         key=h_x
     )
-    h_network = Add()([h_x, attn_output])
-    h_network = LayerNormalization()(h_network)
-    h_network = Flatten()(h_network)
-    h_network = Dense(512, activation='linear')(h_network)
-    h_network = LayerNormalization()(h_network)
-    mu_network.h_network = Model(inputs=h_input, outputs=h_network, name='h_network')
+    h_layers = Add()([h_x, attn_output])
+    h_layers = LayerNormalization()(h_layers)
+    h_layers = Flatten()(h_layers)
+    h_layers = Dense(512, activation='linear')(h_layers)
+    h_layers = LayerNormalization()(h_layers)
+    mu_network.h_network = Model(inputs=h_input, outputs=h_layers, name='h_network')
     mu_network.h_network.summary()
 
     # F network setup
@@ -90,5 +92,32 @@ def get_mucaro_19x19_network():
     p_head = LayerNormalization()(p_head)
     p_head = Activation(activation='silu')(p_head)
     p_head = Dense(361, kernel_initializer='zeros', activation='linear')(p_head)
-    mu_network.f_network = Model(inputs=f_input, outputs=[p_head, v_head])
+    mu_network.f_network = Model(inputs=f_input, outputs=[p_head, v_head], name='f_network')
     mu_network.f_network.summary()
+
+    # G network setup
+    g_latent_input = Input(shape=(512,))
+    g_action_input = Input(shape=(1,), dtype=torch.long)
+    g_action_embedding = Embedding(input_dim=361, output_dim=64)(g_action_input)
+    g_action_embedding = Flatten()(g_action_embedding)
+    g_layers = Concatenate()([g_latent_input, g_action_embedding])
+    r_head = Dense(256, use_bias=False)(g_layers)
+    r_head = LayerNormalization()(r_head)
+    r_head = Activation(activation='silu')(r_head)
+    r_head = Dense(32, use_bias=False)(r_head)
+    r_head = LayerNormalization()(r_head)
+    r_head = Activation(activation='silu')(r_head)
+    r_head = Dense(1, kernel_initializer='zeros', activation='tanh')(r_head)
+
+    delta_latent = Dense(512, use_bias=False)(g_layers)
+    delta_latent = LayerNormalization()(delta_latent)
+    delta_latent = Activation(activation='silu')(delta_latent)
+    delta_latent = Dense(512, use_bias=False)(delta_latent)
+    next_latent = Add()([delta_latent, g_latent_input])
+    next_latent = LayerNormalization()(next_latent)
+    mu_network.g_network = Model(inputs=[g_latent_input, g_action_input], outputs=[next_latent, r_head],
+                                 name='g_network')
+    mu_network.g_network.summary()
+    mu_network.build_consistency_networks(512)
+    mu_network.verify_contract((2, 361), 361)
+    return mu_network

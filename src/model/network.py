@@ -41,9 +41,9 @@ class MuCaroNetwork:
         return next_hidden, reward, policy_logits, value
 
     @torch.no_grad()
-    def consistency_project(self, observation):
-        hidden_state = self.h_network(observation, training=False)
-        return self.projector_network(hidden_state, training=False)
+    def consistency_project(self, observation, training: bool = True):
+        hidden_state = self.h_network(observation, training=training)
+        return self.projector_network(hidden_state, training=training)
 
     def consistency_predict(self, hidden_state, training: bool = True):
         projector_state = self.projector_network(hidden_state, training=training)
@@ -72,6 +72,6 @@ class MuCaroNetwork:
         assert r1.shape == (2, 1), f"Reward shape expected (B, 1), actual {r1.shape}"
 
         z0 = self.consistency_project(dummy_obs)
-        pred0 = self.consistency_predict(z0, training=False)
+        pred0 = self.consistency_predict(h1, training=False)
         assert z0.shape == h0.shape, f"Projector shape expected {h0.shape}, actual {z0.shape}"
         assert pred0.shape == h0.shape, f"Predictor shape expected {h0.shape}, actual {pred0.shape}"
