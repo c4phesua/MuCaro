@@ -1,6 +1,6 @@
 from keras import Input, Model, Layer, ops
 from keras.layers import Conv2D, Activation, Add, LayerNormalization, Reshape, MultiHeadAttention, Flatten, Dense, \
-    Permute, Embedding
+    Permute, Embedding, GroupNormalization
 from keras.src.saving import register_keras_serializable
 
 from model.network import MuCaroNetwork
@@ -39,9 +39,11 @@ def residual_block(layer_x, filters, strides):
     shortcut = layer_x
     layer_x = Conv2D(filters=filters, kernel_size=(3, 3), strides=strides, data_format='channels_first',
                      padding='same', use_bias=False)(layer_x)
-    layer_x = LayerNormalization(axis=[1, 2, 3])(layer_x)
+    layer_x = GroupNormalization(axis=1, groups=1)(layer_x)
     layer_x = Activation(activation='silu')(layer_x)
-    layer_x = Conv2D(filters=filters, kernel_size=(3, 3), data_format='channels_first', padding='same')(layer_x)
+    layer_x = Conv2D(filters=filters, kernel_size=(3, 3), data_format='channels_first', padding='same', use_bias=False)(
+        layer_x)
+    layer_x = GroupNormalization(axis=1, groups=1)(layer_x)
     if shortcut.shape[1] != filters or strides != 1:
         shortcut = Conv2D(filters=filters, kernel_size=(1, 1), strides=strides, data_format='channels_first',
                           padding='same')(shortcut)
